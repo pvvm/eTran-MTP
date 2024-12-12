@@ -32,7 +32,7 @@ sudo make headers_install INSTALL_HDR_PATH=/usr
 # One-shot command to compile, install kernel and reboot
 make -j`nproc` && sudo make modules_install -j`nproc` && sudo make install -j`nproc` && sudo make headers_install INSTALL_HDR_PATH=/usr && sudo shutdown -r now
 ```
-## Build eTran
+### Build eTran
 ```bash
 cd ~/eTran
 # Install bpftool and llvm
@@ -41,7 +41,7 @@ sudo bash install.sh
 ./configure && make -C eTran
 ```
 
-## Run application examples
+### Run application examples
 1. Warm up systems to make sure routing tables are set up correctly in kernel. E.g., ping between servers and clients.
 
 2. Launch microkernel:
