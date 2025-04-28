@@ -1,5 +1,7 @@
 # eTran: Extensible Kernel Transport with eBPF
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 eTran (extensible kernel Transport) is a system for agilely customizing kernel transports. 
 
 eTran achieves agile customizability and kernel safety by (1) leveraging existing eBPF infrastructure such as built-in data structures (eBPF maps), BPF timer, and XDP for fast packet IO, and (2) extending it with new eBPF hooks and maps to support complex transport functionalities while conforming to the strict eBPF verifier for safety. 
@@ -83,4 +85,4 @@ ETRAN_PROTO=tcp ETRAN_NR_APP_THREADS=1 ETRAN_NR_NIC_QUEUES=1 LD_PRELOAD=../share
 ### Contact
 
 Feel free to raise issues or contact us if you have any questions or suggestions. 
-You can reach us at: Zhongjie Chen (chenzhjthu@gmail.com), Yang Zhou (yangzhou.rpc@gmail.com)
+You can reach us at: Zhongjie Chen (chenzhjthu@gmail.com), Yang Zhou (yangzhou.rpc@gmail.com).
