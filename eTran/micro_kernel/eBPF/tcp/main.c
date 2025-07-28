@@ -335,6 +335,15 @@ int xdp_sock_prog(struct xdp_md *ctx)
         goto slowpath;
     }
 
+    struct net_event ev = parse_to_event(tcph, iph);
+
+    // Question: when the client receives the responses, it receives acknowledgements
+    // carrying 100 of data_len. Also, it receives a bunch of non-ack packets with 0
+    // of data_len. Why?
+    
+    //if(ev.data_len > 100)
+        bpf_printk("%d, %d, %d", ev.minor_type, ev.seq_num, ev.data_len); 
+
     struct tcp_timestamp_opt *ts_opt = (struct tcp_timestamp_opt *)(tcph + 1);
     if (unlikely(ts_opt + 1 > data_end)) {
         xdp_log_err("ts_opt + 1 > data_end");

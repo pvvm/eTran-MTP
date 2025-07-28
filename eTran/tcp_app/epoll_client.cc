@@ -15,6 +15,8 @@
 #include <unordered_map>
 #include <atomic>
 
+#include "../lib/include/mtp_only.h"
+
 #define MAX_THREADS 16
 
 #define DATA_BLOCK_SIZE 65536
@@ -48,19 +50,22 @@ static std::atomic<uint64_t> total_resp_bytes[MAX_THREADS] = {};
 uint64_t prev_total_resp_bytes[MAX_THREADS] = {};
 static std::atomic<uint32_t> avg_nr_events(0);
 
+
 struct connection {
     int fd;
     unsigned int recv_len;
     unsigned int pending_bytes;
     unsigned int total_bytes;
-    unsigned int message_bytes;
+    //unsigned int message_bytes;
+    struct send_event event;
     unsigned int max_outstanding;
     char *buf;
     bool no_epoll_out;
     
-    connection(int fd, unsigned int message_bytes, unsigned int max_outstanding) : fd(fd), message_bytes(message_bytes), max_outstanding(max_outstanding) {
+    connection(int fd, unsigned int message_bytes, unsigned int max_outstanding) : fd(fd), /*message_bytes(message_bytes), */max_outstanding(max_outstanding) {
         no_epoll_out = false;
         recv_len = 0;
+        event.data_size = message_bytes;
         total_bytes = message_bytes * max_outstanding;
         pending_bytes = total_bytes;
         buf = (char *)calloc(1, total_bytes);
@@ -69,13 +74,20 @@ struct connection {
 
 static inline int connection_send(unsigned int tid, struct connection *c)
 {
+    int teste = 0;
     ssize_t ret;
-    uint32_t target_bytes;
+    //uint32_t target_bytes = 0;
     int need_epoll_out = 0;
     // Transmit messages as much as possible through this connection until we reach max_outstanding or no buffer space
     while (c->pending_bytes) {
-        target_bytes = std::min(c->pending_bytes, c->message_bytes);
-        ret = write(c->fd, c->buf + (c->total_bytes - c->pending_bytes), std::min(target_bytes, (unsigned int)DATA_BLOCK_SIZE));
+        //printf("Send %d %d\n", teste, target_bytes);
+        //target_bytes = std::min(c->pending_bytes, c->event.data_size);
+        //ret = write(c->fd, c->buf + (c->total_bytes - c->pending_bytes), std::min(target_bytes, (unsigned int)DATA_BLOCK_SIZE));
+
+        // Question: I tried making it more general by passing the send_event instead of the data_size,
+        // but the compiler announced an error that write from unistd.h had to receive size_t.
+        // Would this be okay here?
+        ret = write(c->fd, c->buf + (c->total_bytes - c->pending_bytes), c->event.data_size);
         if (ret > 0) {
             c->pending_bytes -= ret;
             total_req_bytes[tid].fetch_add(ret);
@@ -85,18 +97,20 @@ static inline int connection_send(unsigned int tid, struct connection *c)
             need_epoll_out = 1;
             break;
         }
+        teste++;
     }
     return need_epoll_out;
 }
 
 static inline void connection_recv(unsigned int tid, struct connection *c)
 {
+    //printf("Receive\n");
     ssize_t ret;
-    bool wait_response = c->pending_bytes + c->message_bytes <= c->total_bytes;
+    bool wait_response = c->pending_bytes + c->event.data_size <= c->total_bytes;
     // Receive messages as much as possible through this connection if there are outstanding messages
     while (wait_response) {
         uint32_t target_bytes = short_response ? SHORT_RESPONSE_SIZE : message_bytes;
-        ret = read(c->fd, c->buf + c->recv_len, std::min(target_bytes, (unsigned int)DATA_BLOCK_SIZE));
+        ret = read(c->fd, c->buf + c->recv_len, target_bytes);
         if (ret > 0) {
             c->recv_len += ret;
             total_resp_bytes[tid].fetch_add(ret);
