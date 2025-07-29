@@ -4,6 +4,11 @@
 #define NET_EVENT_ACK 1
 #define NET_EVENT_DATA 0
 
+struct interm_out {
+    __u8 change_cwnd;
+    __u8 skip_ack_eps;
+};
+
 struct net_event {
     __u8 minor_type;
     // ACK

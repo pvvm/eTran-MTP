@@ -14,6 +14,7 @@
 #include "../ebpf_utils.h"
 #include "eTran_defs.h"
 #include "tcp.h"
+#include "mtp_tcp.h"
 
 char LICENSE[] SEC("license") = "GPL";
 
@@ -369,6 +370,8 @@ int xdp_sock_prog(struct xdp_md *ctx)
     data_meta->rx.conn = c->opaque_connection;
 
     ret = tcp_rx_process(tcph, c, pkt_len, data_meta, (iph->tos & IPTOS_ECN_CE) == IPTOS_ECN_CE, cpu);
+
+    net_ev_dispatcher(&ev, c);
     
     if (likely(ret == XDP_REDIRECT && qid < MAX_NIC_QUEUES)) {
         return bpf_redirect_map(&xsks_map, c->qid2xsk[qid], XDP_DROP);

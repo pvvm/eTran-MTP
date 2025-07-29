@@ -157,11 +157,7 @@ struct bpf_tcp_conn {
     __u32 rx_remote_avail;
     /** Offset in buffer to place next segment */
     __u32 rx_next_pos;
-    /** Next sequence number expected */
-    __u32 rx_next_seq;
 
-    /** Duplicate ack count */
-    __u16 rx_dupack_cnt;
     /* Start of interval of out-of-order received data */
     __u32 rx_ooo_start;
     /* Length of interval of out-of-order received data */
@@ -173,13 +169,27 @@ struct bpf_tcp_conn {
     __u32 tx_sent;
     /** Offset in buffer for next segment to be sent */
     __u32 tx_next_pos;
-    /** Sequence number of next segment to be sent */
-    __u32 tx_next_seq;
     /** Timestamp to echo in next packet */
     __u32 tx_next_ts;
 
     __u32 cc_idx;
     __u8 ecn_enable;
+
+    // eTran entries used in MTP
+    /** Duplicate ack count */
+    __u16 rx_dupack_cnt;        // MTP -> duplicate_acks
+    /** Next sequence number expected */
+    __u32 rx_next_seq;          // MTP -> send_una
+    /** Sequence number of next segment to be sent */
+    __u32 tx_next_seq;          // MTP -> send_next
+
+    // MTP-only entries
+    __u8 first_rto;
+    __u32 RTO;
+    __s64 SRTT;
+    __u32 RTTVAR;
+    __u32 last_ack;
+    __u32 rate;
 
     // used by XDP_REDIRECT
     // this value is updated when application calls open() or accept()

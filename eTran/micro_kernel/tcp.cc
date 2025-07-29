@@ -512,6 +512,14 @@ static int reg_tcp_conn_ebpf(struct tcp_connection *c, bool listen)
     ebpf_c.cc_idx = cc_idx;
     ebpf_c.ecn_enable = c->flags & ECN_ENABLE;
 
+    // MTP-only values
+    ebpf_c.RTO = 1000000; // 1 second
+    ebpf_c.SRTT = 0;
+    ebpf_c.RTTVAR = 0;
+    ebpf_c.first_rto = 1;
+    ebpf_c.last_ack = c->remote_seq - 1; // Question: should we use c->remote_seq?
+    ebpf_c.rate = window_to_rate(2 * 1448, TCP_RTT_INIT);
+
     for (unsigned int i = 0; i < c->tctx->actx->nr_nic_queues; i++)
     {
         ebpf_c.qid2xsk[c->tctx->actx->nic_qid[i]] = c->tctx->txrx_xsk_map_key[i];
