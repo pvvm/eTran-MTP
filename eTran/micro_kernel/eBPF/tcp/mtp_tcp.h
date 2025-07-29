@@ -131,7 +131,13 @@ static __always_inline void rto_ep(struct net_event *ev, struct bpf_tcp_conn *c,
 }
 
 static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out) {
+    if(int_out->skip_ack_eps)
+        return;
+
     int_out->change_cwnd = 1;
+    // Question: the way they do this check is a bit different.
+    // It seems that they get the number of bytes acknowledged in the ack, and enter the condition if it's zero
+    // Should we do the same?
     if(ev->ack_seq == c->last_ack) {
         int_out->change_cwnd = 0;
         c->rx_dupack_cnt += 1;
@@ -140,6 +146,10 @@ static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tc
             __u32 go_back_bytes = c->tx_next_seq - c->rx_next_seq;
             c->tx_next_seq -= go_back_bytes;
             // Cut rate by half
+            // Question: in eTran they don't decrease the DCTCP window both in fast retransmission and timeout.
+            // They confirmed it is a bug.
+            // Should we decrease the window here? But by how much, considering that the rate is cut by half
+            // in their implementation?
             c->rate >>= 1;
             // Question: in MTP we would have a set_rate function here.
             // But this rate would only be used in XDP_EGRESS and enqueueing the packets to the timing wheel
@@ -151,11 +161,49 @@ static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tc
     }
 }
 
+static __always_inline void slows_congc_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out) {
+    if(int_out->skip_ack_eps)
+        return;
+    
+    if(int_out->change_cwnd) {
+        // Question: the same from the MTP file.
+        // In their implementation, they run slow start if the number of drops, packets with ECN, and retransmissions
+        // is zero. Meanwhile, this decision is done in ours based on the congestion window size and ssthresh.
+        // Which should we use?
+        // Probably we cannot use their exact implementation here (since it is supposed to happen over intervals
+        // in control path)
+
+        // Question: in the control path, they have the DCTCP window, which is increased with SS or CA.
+        // And, then, this window is converted into rate.
+        // Is it possible for us to keep working only with rate (increasing and decreasing it)?
+        // i.e. no need to keep a window and converting it
+        // I don't think we can do that though
+    }
+}
+
+static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out) {
+    if(int_out->skip_ack_eps)
+        return;
+
+    c->rx_remote_avail = ev->rwnd_size << TCP_WND_SCALE;
+
+    // Question (not really):
+    // Think about how we'll deal with the if(ctx.lwu_seq < ev.seq_num...) here, and so on
+
+    // Question: eTran doesn't have a data_end value in the context.
+    // This value represents the total amount of bytes to send (increased in the send EP).
+    // Does it make sense to send the app_event as an element of the TX metadata, and use
+    // it in the EP implemented in XDP_EGRESS? I think it makes sense
+    //__u32 data_rest = c->
+}
+
 static __always_inline int net_ev_dispatcher(struct net_event *ev, struct bpf_tcp_conn *c) {
     struct interm_out int_out;
     if(ev->minor_type == NET_EVENT_ACK) {
         rto_ep(ev, c, &int_out);
         fast_retr_rec_ep(ev, c, &int_out);
+        slows_congc_ep(ev, c, &int_out);
+        ack_net_ep(ev, c, &int_out);
     } else if (ev->minor_type == NET_EVENT_DATA) {
 
     }
