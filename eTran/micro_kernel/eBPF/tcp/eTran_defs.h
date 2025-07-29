@@ -12,5 +12,5 @@
 #define NAPI_BATCH_SIZE 64
 
 // #define XDP_DEBUG
-// #define XDP_EGRESS_DEBUG
+#define XDP_EGRESS_DEBUG
 // #define XDP_GEN_DEBUG

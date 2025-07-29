@@ -241,10 +241,10 @@ int xdp_egress_prog(struct xdp_md *ctx)
     }
 
     #ifdef XDP_EGRESS_DEBUG
-    bpf_printk("");
-    xdp_egress_dump_eth(eth);
-    xdp_egress_dump_ip(iph);
-    xdp_egress_dump_tcp(tcph);
+    //bpf_printk("");
+    //xdp_egress_dump_eth(eth);
+    //xdp_egress_dump_ip(iph);
+    //xdp_egress_dump_tcp(tcph);
     #endif
     return XDP_TX;
 
@@ -337,12 +337,10 @@ int xdp_sock_prog(struct xdp_md *ctx)
 
     struct net_event ev = parse_to_event(tcph, iph);
 
-    // Question: when the client receives the responses, it receives acknowledgements
-    // carrying 100 of data_len. Also, it receives a bunch of non-ack packets with 0
-    // of data_len. Why?
-    
-    //if(ev.data_len > 100)
-        bpf_printk("%d, %d, %d", ev.minor_type, ev.seq_num, ev.data_len); 
+    // Question: sometimes the sender receives packets carrying 100 bytes of data (not ack).
+    // Why is that?
+
+    //bpf_printk("%u, %u, %u, %u", ev.minor_type, ev.seq_num, ev.data_len, ev.ack_seq); 
 
     struct tcp_timestamp_opt *ts_opt = (struct tcp_timestamp_opt *)(tcph + 1);
     if (unlikely(ts_opt + 1 > data_end)) {

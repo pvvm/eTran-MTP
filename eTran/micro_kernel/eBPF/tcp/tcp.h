@@ -105,10 +105,8 @@ __u64 rx_cached_ts[MAX_CPU];
 
 static __always_inline struct net_event parse_to_event(struct tcphdr *tcph, struct iphdr *iph) {
     struct net_event ev;
-    if(tcph->ack)
-        ev.minor_type = NET_EVENT_ACK;
-    else
-        ev.minor_type = NET_EVENT_DATA;
+    // 1 == NET_EVENT_ACK, 0 == NET_EVENT_DATA
+    ev.minor_type = tcph->ack;
     ev.ack_seq = bpf_ntohl(tcph->ack_seq);
     ev.rwnd_size = bpf_ntohs(tcph->window);
     ev.seq_num = bpf_ntohl(tcph->seq);
@@ -458,6 +456,8 @@ static __always_inline int tcp_tx_process(struct iphdr *iph, struct tcphdr *tcph
     __u64 desired_tx_ts = cc_get_desired_tx_ts(cc, ref_ts, payload_len);
 
     fill_tcp_hdr(iph, tcph, c, desired_tx_ts, data_end, 0);
+
+    //bpf_printk("%u", c->tx_next_seq);
 
     fill_ip_hdr(iph, payload_len, c->ecn_enable);
 
