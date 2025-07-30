@@ -151,8 +151,6 @@ struct bpf_tcp_conn {
     __u32 rx_buf_size;
     __u32 tx_buf_size;
 
-    /** Bytes available for received segments at next position */
-    __u32 rx_avail;
     /** Bytes available in remote end for received segments */
     __u32 rx_remote_avail;
     /** Offset in buffer to place next segment */
@@ -179,9 +177,11 @@ struct bpf_tcp_conn {
     /** Duplicate ack count */
     __u16 rx_dupack_cnt;        // MTP -> duplicate_acks
     /** Next sequence number expected */
-    __u32 rx_next_seq;          // MTP -> send_una
+    __u32 rx_next_seq;          // MTP -> recv_next
     /** Sequence number of next segment to be sent */
     __u32 tx_next_seq;          // MTP -> send_next
+    /** Bytes available for received segments at next position */
+    __u32 rx_avail;             // MTP -> rwnd_size
 
     // MTP-only entries
     __u8 first_rto;
@@ -190,6 +190,7 @@ struct bpf_tcp_conn {
     __u32 RTTVAR;
     __u32 last_ack;
     __u32 rate;
+    __u32 send_una;
 
     // used by XDP_REDIRECT
     // this value is updated when application calls open() or accept()

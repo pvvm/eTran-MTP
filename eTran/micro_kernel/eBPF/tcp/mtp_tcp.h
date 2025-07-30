@@ -99,9 +99,10 @@ SEC(".bss.rx_cached_ts")
 __u64 rx_cached_ts[MAX_CPU];*/
 
 #include <stdlib.h>
+#include "tcp.h"
 
-static __always_inline void rto_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out) {
-    if(ev->ack_seq < c->rx_next_seq || c->tx_next_seq < ev->ack_seq) {
+static __always_inline void rto_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta, __u32 cpu) {
+    if(ev->ack_seq < c->send_una || c->tx_next_seq < ev->ack_seq) {
         int_out->skip_ack_eps = 1;
         return;
     }
@@ -130,7 +131,7 @@ static __always_inline void rto_ep(struct net_event *ev, struct bpf_tcp_conn *c,
     }
 }
 
-static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out) {
+static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta, __u32 cpu) {
     if(int_out->skip_ack_eps)
         return;
 
@@ -143,7 +144,7 @@ static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tc
         c->rx_dupack_cnt += 1;
         if(c->rx_dupack_cnt == 3) {
             c->rx_dupack_cnt = 0;
-            __u32 go_back_bytes = c->tx_next_seq - c->rx_next_seq;
+            __u32 go_back_bytes = c->tx_next_seq - c->send_una;
             c->tx_next_seq -= go_back_bytes;
             // Cut rate by half
             // Question: in eTran they don't decrease the DCTCP window both in fast retransmission and timeout.
@@ -161,7 +162,7 @@ static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tc
     }
 }
 
-static __always_inline void slows_congc_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out) {
+static __always_inline void slows_congc_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta, __u32 cpu) {
     if(int_out->skip_ack_eps)
         return;
     
@@ -181,7 +182,7 @@ static __always_inline void slows_congc_ep(struct net_event *ev, struct bpf_tcp_
     }
 }
 
-static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out) {
+static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta, __u32 cpu) {
     if(int_out->skip_ack_eps)
         return;
 
@@ -195,17 +196,213 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
     // Does it make sense to send the app_event as an element of the TX metadata, and use
     // it in the EP implemented in XDP_EGRESS? I think it makes sense
     //__u32 data_rest = c->
+    
+    // TODO: complete this EP later
 }
 
-static __always_inline int net_ev_dispatcher(struct net_event *ev, struct bpf_tcp_conn *c) {
-    struct interm_out int_out;
-    if(ev->minor_type == NET_EVENT_ACK) {
-        rto_ep(ev, c, &int_out);
-        fast_retr_rec_ep(ev, c, &int_out);
-        slows_congc_ep(ev, c, &int_out);
-        ack_net_ep(ev, c, &int_out);
-    } else if (ev->minor_type == NET_EVENT_DATA) {
-
+static __always_inline int trim_and_handle_ooo(__u32 *seq, __u32 *payload_len, struct bpf_tcp_conn *c, struct meta_info *data_meta, __u32 cpu) {
+    __u32 rx_bump = 0;
+    __u32 trim_start, trim_end;
+    int_out->trigger_ack = true;
+    // Question: in eTran, they do not generate an ACK if the seq num is invalid.
+    // Should we do the same?
+    if (unlikely(tcp_valid_rxseq_ooo(c, *seq, *payload_len, &trim_start, &trim_end))) {
+        int_out->trigger_ack = false;
+        //xdp_log_err("Bad seq");
+        //goto unlock;
+        return rx_bump;
     }
-    return 0;
+    __u32 payload_off = sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct tcphdr) + TS_OPT_SIZE;
+    payload_off += trim_start;
+    if (likely(*payload_len >= trim_start + trim_end))
+        *payload_len -= trim_start + trim_end;
+    data_meta->rx.poff = payload_off;
+    data_meta->rx.plen = *payload_len;
+
+    *seq += trim_start;
+    data_meta->rx.rx_pos = c->rx_next_pos + (*seq - c->rx_next_seq);
+    if (data_meta->rx.rx_pos >= c->rx_buf_size)
+        data_meta->rx.rx_pos -= c->rx_buf_size;
+
+    /* check if we can add it to the out of order interval */
+    if (unlikely(*seq != c->rx_next_seq)) {
+        if (!*payload_len) return rx_bump;
+        xdp_log("OOO packet, seq(%u), c->rx_next_seq(%u)", *seq, c->rx_next_seq);
+        if (c->rx_ooo_len == 0) {
+            c->rx_ooo_start = *seq;
+            c->rx_ooo_len = *payload_len;
+            xdp_log("New segment, ooo_start(%u), ooo_len(%u)", c->rx_ooo_start, c->rx_ooo_len);
+        } else if (*seq + *payload_len == c->rx_ooo_start) {
+            c->rx_ooo_start = *seq;
+            c->rx_ooo_len += *payload_len;
+            xdp_log("Merge segment, ooo_start(%u), ooo_len(%u)", c->rx_ooo_start, c->rx_ooo_len);
+        } else if (c->rx_ooo_start + c->rx_ooo_len == *seq) {
+            c->rx_ooo_len += *payload_len;
+            xdp_log("Merge segment, ooo_start(%u), ooo_len(%u)", c->rx_ooo_start, c->rx_ooo_len);
+        } else {
+            // unfortunately, we can't accept this payload
+            *payload_len = 0;
+            data_meta->rx.plen = POISON_16;
+            xdp_log("Drop packet, ooo_start(%u), ooo_len(%u)", c->rx_ooo_start, c->rx_ooo_len);
+        }
+        // mark this packet is an out-of-order segment
+        data_meta->rx.ooo_bump = OOO_SEGMENT_MASK;
+
+        //goto unlock;
+    }
+
+    /* update TCP state if we have payload */
+    if (likely(*payload_len)) {
+        rx_bump = *payload_len;
+        c->rx_avail -= *payload_len;
+        c->rx_next_pos += *payload_len;
+        if (c->rx_next_pos >= c->rx_buf_size)
+            c->rx_next_pos -= c->rx_buf_size;
+        c->rx_next_seq += *payload_len;
+
+        // xdp_log("seq(%u), payload_len(%u), c->rx_avail(%u), c->rx_next_pos(%u), c->rx_next_seq(%u)", seq, *payload_len, c->rx_avail, c->rx_next_pos, c->rx_next_seq);
+        
+        /* handle existing out-of-order segments */
+        if (unlikely(c->rx_ooo_len)) {
+            if (tcp_valid_rxseq_ooo(c, c->rx_ooo_start, c->rx_ooo_len, &trim_start, &trim_end)) {
+                /* completely superfluous: drop out of order interval */
+                c->rx_ooo_len = 0;
+                data_meta->rx.ooo_bump = OOO_CLEAR_MASK;
+                trigger_ack = false;
+                clear_ooo = true;
+            } else {
+                c->rx_ooo_start += trim_start;
+                c->rx_ooo_len -= trim_start + trim_end;
+
+                // accept out-of-order segments
+                if (c->rx_ooo_len && c->rx_ooo_start == c->rx_next_seq) {
+                    xdp_log("c->rx_ooo_len(%u), c->rx_ooo_start(%u), c->rx_next_seq(%u)", c->rx_ooo_len, c->rx_ooo_start, c->rx_next_seq);
+                    rx_bump += c->rx_ooo_len;
+                    c->rx_avail -= c->rx_ooo_len;
+                    c->rx_next_pos += c->rx_ooo_len;
+                    if (c->rx_next_pos >= c->rx_buf_size)
+                        c->rx_next_pos -= c->rx_buf_size;
+                    c->rx_next_seq += c->rx_ooo_len;
+
+                    c->rx_ooo_len = 0;
+                    // out-of-order segment is processed
+                    data_meta->rx.ooo_bump = OOO_FIN_MASK;
+                    xdp_log("Out-of-order segment is processed");
+                }
+            }
+        }
+
+        if (unlikely((c->rx_avail >> TCP_WND_SCALE) == 0)) {
+            // ebpf realized that the receive buffer is empty,
+            // piggyback a signal to lib, once application releases the buffer, force it sync with us
+            data_meta->rx.qid |= FORCE_RX_BUMP_MASK;
+            // bpf_printk("force");
+        }
+        // bpf_printk("c->rx_avail = %u", c->rx_avail);
+    }
+    return rx_bump;
+}
+
+static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta, __u32 cpu) {
+
+    // Maybe remove this one if we simply use eTran's solution
+    if((c->rx_avail == 0 && ev.data_len > 0) ||
+       (ev->seq_num > c->rx_next_seq + c->rx_avail) ||
+       (ev->seq_num + ev->data_len - 1 < c->rx_next_seq)) {
+        return;
+    }
+
+    // Question: the same as in the MTP file.
+    // eTran has a function that checks if an ack is valid and out-of-order (tcp_valid_rxseq_ooo)
+    // Should we use the same function as they use to do that?
+    // Also, different to ours approach, it seems that they keep track of only one interval of OOO sequence numbers
+    // For example, if X is a sequence number that arrived and _ is a missing sequence number, this situation:
+    // ___XXXX____XXXX____
+    // Wouldn't be possible, because it seems that they only support one interval of OOO sequence numbers, like:
+    // ___XXXXXXXX____
+    // Should we do the same, then? (not use the sliding window idea we have in MTP)
+    // For, now, I'll use their implementation, assuming that the set and first_unset sliding
+    // window methods can be translated as this function call:
+
+    __u32 seq = ev->seq_num;
+    __u32 payload_len = ev->data_len;
+
+    // Question: following the idea presented above, I chose to have a function containing
+    // their code that handles payload triming and OOO handling.
+    // But the problem is that they do operations over c->rx_next_seq and c->rx_avail.
+    // For c->rx_next_seq, which is the next sequence number expected to recv (equivalent to our ctx.recv_next),
+    // they kind of consider that their "sliding window" start from it, using it to see if the payload
+    // is valid an OOO. However, in MTP we do not pass anything like that in the set method. What should we do
+    // in this case?
+    // At least, we can update c->rx_next_seq by (instead of doing in the function) making it return the desired
+    // value and then updating it here (same for c->rx_avail). But the problem still remains regarding using
+    // this value in the function.
+    // And for c->rx_avail, which is the number of bytes available to recv (they treat it as the recv window size),
+    // we do not change its in our code (it is constant). Meanwhile, in eTran they change it. What should we do here?
+
+    __u32 rx_bump = trim_and_handle_ooo(seq, payload_len, c, data_meta);
+
+    // Question: maybe we'll need to use TCP_LOCK across the code.
+    // It seems that this lock is used to access the context c, and it is acquired/released
+    // by the different XDP programs. So, they can run in parallel? It seems so
+    // The problem is where to put the locks. They put at the start of the tcp process functions
+    // and the function that enqueues ACKs.
+    // Maybe we simply add at the start of net_ev_dispatcher and the app dispatcher (if there is one)?
+
+    // Question: I wonder if add_data_seg could be translated the section below.
+    // ev.data_len would be converted to payload_len and the rest wouldn't
+    // matter or data_meta would be filled already in the function above (like the offset (last arg) and rx.poff)
+    if(rx_bump) {
+        int_out->drop = 0;
+        data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
+        xdp_log("xsk_budget_avail(%u)", data_meta->rx.xsk_budget_avail);
+        /*if (tx_bump)
+            data_meta->rx.ack_bytes = tx_bump;
+        else if (unlikely(go_back_pos)) {
+            xdp_log("go_back_pos(%u)", go_back_pos);
+            data_meta->rx.go_back_pos = go_back_pos;
+            data_meta->rx.go_back_pos |= RECOVERY_MASK;
+        }*/
+
+        if (!payload_len) {
+            data_meta->rx.rx_pos = POISON_32;
+            data_meta->rx.poff = POISON_16;
+            data_meta->rx.plen = POISON_16;
+            //goto out;
+        } else if (unlikely(data_meta->rx.ooo_bump & OOO_FIN_MASK)) {
+            /* piggyback rx_bump */
+            data_meta->rx.ooo_bump |= rx_bump;
+        }
+    }
+}
+
+static __always_inline void send_ack(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta, __u32 cpu) {
+    if(!int_out->trigger_ack) {
+        return;
+    }
+    
+    // TODO: convert this into an pkt_bp to generate an ACK
+    if (likely(cpu < MAX_CPU) && prev_conn[cpu] == NULL_CONN) {
+        prev_conn[cpu] = c->cc_idx;
+        prev_conn_li[cpu] = c->local_ip;
+        prev_conn_lp[cpu] = c->local_port;
+        prev_conn_ri[cpu] = c->remote_ip;
+        prev_conn_rp[cpu] = c->remote_port;
+        prev_conn_ece[cpu] |= ece;
+    }
+}
+
+static __always_inline int net_ev_dispatcher(struct net_event *ev, struct bpf_tcp_conn *c, struct meta_info *data_meta, __u32 cpu) {
+    struct interm_out int_out;
+    int_out.drop = 1;
+    if(ev->minor_type == NET_EVENT_ACK) {
+        rto_ep(ev, c, &int_out, data_meta, cpu);
+        fast_retr_rec_ep(ev, c, &int_out, data_meta, cpu);
+        slows_congc_ep(ev, c, &int_out, data_meta, cpu);
+        ack_net_ep(ev, c, &int_out, data_meta, cpu);
+    } else if (ev->minor_type == NET_EVENT_DATA) {
+        data_net_ep(ev, c, &int_out, data_meta, cpu);
+        send_ack(ev, c, &int_out, data_meta, cpu);
+    }
+    return int_out->drop ? XDP_DROP : XDP_REDIRECT;
 }

@@ -7,6 +7,8 @@
 struct interm_out {
     __u8 change_cwnd;
     __u8 skip_ack_eps;
+    __u8 trigger_ack;
+    __u8 drop;
 };
 
 struct net_event {

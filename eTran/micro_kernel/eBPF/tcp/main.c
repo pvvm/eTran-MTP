@@ -371,7 +371,7 @@ int xdp_sock_prog(struct xdp_md *ctx)
 
     ret = tcp_rx_process(tcph, c, pkt_len, data_meta, (iph->tos & IPTOS_ECN_CE) == IPTOS_ECN_CE, cpu);
 
-    net_ev_dispatcher(&ev, c);
+    net_ev_dispatcher(&ev, c, data_meta);
     
     if (likely(ret == XDP_REDIRECT && qid < MAX_NIC_QUEUES)) {
         return bpf_redirect_map(&xsks_map, c->qid2xsk[qid], XDP_DROP);
