@@ -222,6 +222,8 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
         return;
     }
 
+    // TODO: probably update context values
+
     // Question: similarly, in eTran they simply send number of ack_bytes to userspace
     // by redirecting it back as a metadata. It doesn't have something like the whole flush idea
     __u32 tx_bump = ev->ack_seq - c->send_una;
@@ -454,6 +456,10 @@ static __always_inline void send_ack(struct net_event *ev, struct bpf_tcp_conn *
 
     ack_prod[cpu] = (ack_prod[cpu] + 1) & (NAPI_BATCH_SIZE - 1);
 }
+
+// Question: do we need to have a scheduler in eTran?
+// I guess that the only queue that we could have would be timer, but I'm not sure if that
+// would be necessary
 
 static __always_inline int net_ev_dispatcher(struct net_event *ev, struct bpf_tcp_conn *c, struct meta_info *data_meta, __u32 cpu) {
     struct interm_out int_out;
