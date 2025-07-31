@@ -11,6 +11,14 @@ struct interm_out {
     __u8 drop;
 };
 
+struct app_event {
+    __u32 data_size;
+};
+
+struct timer_event {
+    __u32 seq_num;
+};
+
 struct net_event {
     __u8 minor_type;
     // ACK

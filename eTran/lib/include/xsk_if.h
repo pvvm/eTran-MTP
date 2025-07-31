@@ -322,13 +322,11 @@ static inline void tcp_txmeta_clear_all(char *umem_area, uint64_t addr)
     memset(x, 0, 32);
 }
 
-// Question: maybe, instead of sending one value of the app event, we should send
-// the whole struct that represents it, for generalization?
-static inline void tcp_txmeta_dataend(char *umem_area, uint64_t addr, uint64_t data_len)
+/*static inline void tcp_txmeta_dataend(char *umem_area, uint64_t addr, uint64_t data_len)
 {
     char *x = (char *)xsk_umem__get_data(umem_area, addr) - TX_DATA_END_OFFSET;
     *(uint64_t *)x = data_len;
-}
+}*/
 
 static inline void tcp_txmeta_from_slowpath(char *umem_area, uint64_t addr, uint64_t flag)
 {

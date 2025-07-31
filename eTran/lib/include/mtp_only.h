@@ -1,7 +1,7 @@
 #ifndef MTP_ONLY_H
 #define MTP_ONLY_H
 
-struct send_event {
+struct app_event {
     unsigned int data_size;
 };
 

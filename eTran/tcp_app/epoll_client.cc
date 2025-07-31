@@ -57,7 +57,7 @@ struct connection {
     unsigned int pending_bytes;
     unsigned int total_bytes;
     //unsigned int message_bytes;
-    struct send_event event;
+    struct app_event event;
     unsigned int max_outstanding;
     char *buf;
     bool no_epoll_out;
@@ -84,7 +84,7 @@ static inline int connection_send(unsigned int tid, struct connection *c)
         //target_bytes = std::min(c->pending_bytes, c->event.data_size);
         //ret = write(c->fd, c->buf + (c->total_bytes - c->pending_bytes), std::min(target_bytes, (unsigned int)DATA_BLOCK_SIZE));
 
-        // Question: I tried making it more general by passing the send_event instead of the data_size,
+        // Question: I tried making it more general by passing the app_event instead of the data_size,
         // but the compiler announced an error that write from unistd.h had to receive size_t.
         // Would this be okay here?
         ret = write(c->fd, c->buf + (c->total_bytes - c->pending_bytes), c->event.data_size);

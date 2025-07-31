@@ -106,17 +106,6 @@ __u64 tx_cached_ts[MAX_CPU];
 SEC(".bss.rx_cached_ts")
 __u64 rx_cached_ts[MAX_CPU];
 
-static __always_inline struct net_event parse_to_event(struct tcphdr *tcph, struct iphdr *iph) {
-    struct net_event ev;
-    // 1 == NET_EVENT_ACK, 0 == NET_EVENT_DATA
-    ev.minor_type = tcph->ack;
-    ev.ack_seq = bpf_ntohl(tcph->ack_seq);
-    ev.rwnd_size = bpf_ntohs(tcph->window);
-    ev.seq_num = bpf_ntohl(tcph->seq);
-    ev.data_len = bpf_ntohs(iph->tot_len) - (sizeof(struct iphdr) + sizeof(struct tcphdr) + TS_OPT_SIZE);
-    return ev;
-}
-
 static __always_inline int ackqueue_empty(void)
 {
     __u32 cpu = bpf_get_smp_processor_id();

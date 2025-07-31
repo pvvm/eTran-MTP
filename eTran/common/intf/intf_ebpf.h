@@ -40,8 +40,6 @@
 
 //////////////////////// control path ////////////////////////
 typedef struct __attribute__((packed)) {
-    // the total amount of bytes for the app request operation
-    //__u32 data_len;
     __u64 slowpath;
     // this packet is a control signal
     __u64 flag;

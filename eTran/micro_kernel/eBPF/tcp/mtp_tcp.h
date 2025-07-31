@@ -101,6 +101,82 @@ __u64 rx_cached_ts[MAX_CPU];*/
 #include <stdlib.h>
 #include "tcp.h"
 
+static __always_inline int app_ev_dispatcher(struct app_event *ev, struct bpf_tcp_conn *c, struct meta_info *data_meta) {
+    struct interm_out int_out;
+    int_out.drop = 1;
+
+    // TODO: implement the app EP, but (hopefully it will be the most straight to the point)
+    return 0;
+}
+
+
+static __always_inline struct app_event parse_req_to_app_event(struct meta_info *data_meta) {
+    struct app_event ev;
+    // Question: this could work, but the thing is that this is target-specific, i.e.
+    // it is a part of eTran's TX metadata. Also, it is the length for that batch of packets
+    // (given the userspace window)
+    // We may need to have a way to send the application and timer event to XDP_EGRESS without
+    // using the metadata (how about some metadata after the payload?)
+    ev.data_size = data_meta->tx.plen;
+    return ev;
+}
+
+
+static __always_inline void ack_timeout_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta) {
+    // Halve rate
+    c->rate >>= 1;
+    // TODO: halve window too?
+    //c->
+    __u32 go_back_bytes = c->data_end - c->send_una;
+    c->tx_next_seq -= go_back_bytes;
+
+    // Question: to translate the unseg_data into this section of code, we would probably
+    // need to just get the second argument and use it here.
+    data_meta->rx.go_back_pos = go_back_bytes;
+    // prepare to redirect to userspace
+    data_meta->rx.qid = POISON_32;
+    data_meta->rx.conn = c->opaque_connection;
+    data_meta->rx.rx_pos = POISON_32;
+    data_meta->rx.poff = POISON_16;
+    data_meta->rx.plen = POISON_16;
+    data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
+    data_meta->rx.go_back_pos |= RECOVERY_MASK;
+    data_meta->rx.ooo_bump = POISON_32;
+
+    int_out->drop = 0;
+}
+
+static __always_inline int timer_ev_dispatcher(struct timer_event *ev, struct bpf_tcp_conn *c, struct meta_info *data_meta) {
+    struct interm_out int_out;
+    int_out.drop = 1;
+    ack_timeout_ep(ev, c, &int_out, data_meta);
+
+    return int_out.drop ? XDP_DROP : XDP_PASS;
+}
+
+static __always_inline struct timer_event parse_req_to_timer_event(struct meta_info *data_meta) {
+    struct timer_event ev;
+    // Question: what will be set here is also a bit complex.
+    // What is in the timer event will be set and reset by EPs (send and ack), in addition to the
+    // timer itself. Meanwhile, the control path will keep track of the timer. When the timer is
+    // reached, it will need to send the timer event associated to that timer back here.
+    // Does that make sense? I wonder if there might be situations where it might be problematic
+
+    // ev.seq_num = data_meta->tx.;
+    return ev;
+}
+
+static __always_inline struct net_event parse_pkt_to_event(struct tcphdr *tcph, struct iphdr *iph) {
+    struct net_event ev;
+    // 1 == NET_EVENT_ACK, 0 == NET_EVENT_DATA
+    ev.minor_type = tcph->ack;
+    ev.ack_seq = bpf_ntohl(tcph->ack_seq);
+    ev.rwnd_size = bpf_ntohs(tcph->window);
+    ev.seq_num = bpf_ntohl(tcph->seq);
+    ev.data_len = bpf_ntohs(iph->tot_len) - (sizeof(struct iphdr) + sizeof(struct tcphdr) + TS_OPT_SIZE);
+    return ev;
+}
+
 static __always_inline void rto_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta, __u32 cpu) {
     // Question: should we use their implementation of tcp_valid_ack?
     if(ev->ack_seq < c->send_una || c->tx_next_seq < ev->ack_seq) {
@@ -196,6 +272,11 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
     // This value represents the total amount of bytes to send (increased in the send EP).
     // Does it make sense to send the app_event as an element of the TX metadata, and use
     // it in the EP implemented in XDP_EGRESS? I think it makes sense
+    // But the problem is that we cannot use the metadatas, because it seems that their
+    // current metadata are already using the maximum size (32 bytes). So, we have the following options:
+    // Use the current information that they have in the metadatas (they send the size of a batch). But this wouldn't be general
+    // Repurpose their metadata. But that would probably break the whole eTran system (also, still limited with the 32 bytes)
+    // Have another way to send this information. But it is probably hard to synchronize userspace and XDP_EGRESS?
     
     __u32 data_rest = c->data_end - c->tx_next_seq;
     if(data_rest == 0 && ev->ack_seq == c->tx_next_seq) {
@@ -221,7 +302,7 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
         return;
     }
 
-    // TODO: probably update context values
+    // TODO: update context values
 
     // Question: similarly, in eTran they simply send number of ack_bytes to userspace
     // by redirecting it back as a metadata. It doesn't have something like the whole flush idea
