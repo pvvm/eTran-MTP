@@ -102,6 +102,7 @@ __u64 rx_cached_ts[MAX_CPU];*/
 #include "tcp.h"
 
 static __always_inline void rto_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta, __u32 cpu) {
+    // Question: should we use their implementation of tcp_valid_ack?
     if(ev->ack_seq < c->send_una || c->tx_next_seq < ev->ack_seq) {
         int_out->skip_ack_eps = 1;
         return;
@@ -143,7 +144,8 @@ static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tc
         int_out->change_cwnd = 0;
         c->rx_dupack_cnt += 1;
         if(c->rx_dupack_cnt == 3) {
-            c->rx_dupack_cnt = 0;
+            // Commented here, because I'm zeroing it ack_net_ep
+            // c->rx_dupack_cnt = 0;
             __u32 go_back_bytes = c->tx_next_seq - c->send_una;
             c->tx_next_seq -= go_back_bytes;
             // Cut rate by half
@@ -186,21 +188,47 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
     if(int_out->skip_ack_eps)
         return;
 
-    c->rx_remote_avail = ev->rwnd_size << TCP_WND_SCALE;
-
     // Question (not really):
     // Think about how we'll deal with the if(ctx.lwu_seq < ev.seq_num...) here, and so on
+    // __u32 rwindow = ev->rwnd_size << TCP_WND_SCALE;
 
     // Question: eTran doesn't have a data_end value in the context.
     // This value represents the total amount of bytes to send (increased in the send EP).
     // Does it make sense to send the app_event as an element of the TX metadata, and use
     // it in the EP implemented in XDP_EGRESS? I think it makes sense
-    //__u32 data_rest = c->
     
-    // TODO: complete this EP later
+    // TODO: add data_end to context, in case the idea above makes sense
+    __u32 data_rest = c->data_end - c->tx_next_seq;
+    if(data_rest == 0 && ev->ack_seq == c->tx_next_seq) {
+        // Question: here we should have a function call to cancel the timer.
+        // Probably set a boolean that is mmapped to control path, saying that the timer is cancelled
+        return;
+    }
+    
+    if(c->rx_dupack_cnt == 3) {
+        c->rx_dupack_cnt = 0;
+        // Question: this part is quite contrived.
+        // To notify the userspace to retransmit the packets (with go-back-N), eTran simply
+        // marks the ACK packet with this flag and specify the number of bytes to go back
+        // (with c->tx_next_seq, after it was decreased in fast_retransmit).
+        // But how would the compiler be able to convert that whole pkt_bp creation,
+        // pkt_gen_instr, and so on, into this?
+        data_meta->rx.go_back_pos = c->tx_next_seq;
+        data_meta->rx.go_back_pos |= RECOVERY_MASK;
+
+        // Redirect it to userspace
+        int_out->drop = 0;
+
+        return;
+    }
+
+    // Question: similarly, in eTran they simply send number of ack_bytes to userspace
+    // by redirecting it back as a metadata. It doesn't have something like the whole flush idea
+    __u32 tx_bump = ev->ack_seq - c->send_una;
+    data_meta->rx.ack_bytes = tx_bump;
 }
 
-static __always_inline int trim_and_handle_ooo(__u32 *seq, __u32 *payload_len, struct bpf_tcp_conn *c, struct meta_info *data_meta, __u32 cpu) {
+static __always_inline int trim_and_handle_ooo(__u32 *seq, __u32 *payload_len, struct bpf_tcp_conn *c, struct meta_info *data_meta, struct interm_out *int_out, bool *clear_ooo) {
     __u32 rx_bump = 0;
     __u32 trim_start, trim_end;
     int_out->trigger_ack = true;
@@ -268,8 +296,8 @@ static __always_inline int trim_and_handle_ooo(__u32 *seq, __u32 *payload_len, s
                 /* completely superfluous: drop out of order interval */
                 c->rx_ooo_len = 0;
                 data_meta->rx.ooo_bump = OOO_CLEAR_MASK;
-                trigger_ack = false;
-                clear_ooo = true;
+                int_out->trigger_ack = false;
+                *clear_ooo = true;
             } else {
                 c->rx_ooo_start += trim_start;
                 c->rx_ooo_len -= trim_start + trim_end;
@@ -340,7 +368,8 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
     // And for c->rx_avail, which is the number of bytes available to recv (they treat it as the recv window size),
     // we do not change its in our code (it is constant). Meanwhile, in eTran they change it. What should we do here?
 
-    __u32 rx_bump = trim_and_handle_ooo(seq, payload_len, c, data_meta);
+    __u8 clear_ooo = false;
+    __u32 rx_bump = trim_and_handle_ooo(seq, payload_len, c, data_meta, int_out, &clear_ooo);
 
     // Question: maybe we'll need to use TCP_LOCK across the code.
     // It seems that this lock is used to access the context c, and it is acquired/released
@@ -352,7 +381,7 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
     // Question: I wonder if add_data_seg could be translated the section below.
     // ev.data_len would be converted to payload_len and the rest wouldn't
     // matter or data_meta would be filled already in the function above (like the offset (last arg) and rx.poff)
-    if(rx_bump) {
+    if(rx_bump || clear_ooo) {
         int_out->drop = 0;
         data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
         xdp_log("xsk_budget_avail(%u)", data_meta->rx.xsk_budget_avail);
@@ -381,15 +410,49 @@ static __always_inline void send_ack(struct net_event *ev, struct bpf_tcp_conn *
         return;
     }
     
-    // TODO: convert this into an pkt_bp to generate an ACK
-    if (likely(cpu < MAX_CPU) && prev_conn[cpu] == NULL_CONN) {
-        prev_conn[cpu] = c->cc_idx;
-        prev_conn_li[cpu] = c->local_ip;
-        prev_conn_lp[cpu] = c->local_port;
-        prev_conn_ri[cpu] = c->remote_ip;
-        prev_conn_rp[cpu] = c->remote_port;
-        prev_conn_ece[cpu] |= ece;
+    // Question: eTran has two ways to generate ACKs. One ACK per arriving packet and
+    // ACK coalescing. It seems that they use ACK coalescing by default.
+    // On one hand, using ACK coalescing might be useful to compare with an "optimized" eTran,
+    // and might also be useful to see how that can be implemented in MTP.
+    // However, the way they trigger the ACK enqueue is a bit different from our approach.
+    // An ACK is enqueued if: the current packet's flow is different from the last, which
+    // results in enqueueing values from the previous packet's context; or if XDP_GEN runs,
+    // meaning a NAPI batch is finished.
+    // But how can we represent these ideas in MTP? Storing flow IDs between packets may be
+    // a bit contrived, and I think that the context wouldn't serve for that, since it's per-flow.
+    // And MTP won't have a way to understand a NAPI batch.
+
+    // Looks to me that using the per-packet ACK would better match what we have and,
+    // probably, MTP. I'll be following this approach for now
+
+    struct bpf_tcp_ack *ack = NULL;
+    __u32 prod = ack_prod[cpu];
+    __u32 cons = ack_cons[cpu];
+
+    // check if ack queue is full
+    if (unlikely(cons == ((prod + 1) & (NAPI_BATCH_SIZE - 1)))) {
+        xdp_log_err("ack queue is full");
+    } else {
+        ack = bpf_map_lookup_elem(&bpf_tcp_ack_map, &prod);
+        if (unlikely(!ack))
+            xdp_log_err("ack is NULL");
     }
+
+    ack->local_ip = c->local_ip;
+    ack->remote_ip = c->remote_ip;
+    ack->local_port = c->local_port;
+    ack->remote_port = c->remote_port;
+    ack->seq = c->tx_next_seq;
+    ack->ack = c->rx_next_seq;
+    ack->rxwnd = c->rx_avail;
+    ack->is_ack = 1;
+    // Question: similar to other questions, should we add these timestamps?
+    // It seems that they are used to calculate the RTT. In our implementation, we consider it a constant
+    /*ack->ts_val = now;
+    ack->ts_ecr = c->tx_next_ts;
+    c->tx_next_ts = 0;*/
+
+    ack_prod[cpu] = (ack_prod[cpu] + 1) & (NAPI_BATCH_SIZE - 1);
 }
 
 static __always_inline int net_ev_dispatcher(struct net_event *ev, struct bpf_tcp_conn *c, struct meta_info *data_meta, __u32 cpu) {

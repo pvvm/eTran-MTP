@@ -128,7 +128,7 @@ int xdp_gen_prog(struct xdp_md *ctx)
     tcph->syn = 0;
     tcph->rst = 0;
     tcph->psh = 0;
-    tcph->ack = 1;
+    tcph->ack = ack->is_ack;
     tcph->urg = 0;
     tcph->ece = ack->ecn_flags;
     tcph->cwr = 0;

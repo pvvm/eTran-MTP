@@ -83,6 +83,9 @@ struct bpf_tcp_ack {
     __u32 ts_ecr; // tx_next_ts
 
     __u8 ecn_flags;
+
+    // MTP-only entries
+    __u8 is_ack;    // Question: it isn't necessary, but just to make it match with MTP
 };
 
 struct {
