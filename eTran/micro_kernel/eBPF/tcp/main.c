@@ -128,7 +128,9 @@ int xdp_gen_prog(struct xdp_md *ctx)
     tcph->syn = 0;
     tcph->rst = 0;
     tcph->psh = 0;
-    tcph->ack = ack->is_ack;
+    // TODO: remember to change this back when ACK ep is working properly
+    tcph->ack = 1;
+    //tcph->ack = ack->is_ack;
     tcph->urg = 0;
     tcph->ece = ack->ecn_flags;
     tcph->cwr = 0;
@@ -371,7 +373,7 @@ int xdp_sock_prog(struct xdp_md *ctx)
 
     ret = tcp_rx_process(tcph, c, pkt_len, data_meta, (iph->tos & IPTOS_ECN_CE) == IPTOS_ECN_CE, cpu);
 
-    net_ev_dispatcher(&ev, c, data_meta, cpu);
+    //net_ev_dispatcher(&ev, c, data_meta, cpu);
     
     if (likely(ret == XDP_REDIRECT && qid < MAX_NIC_QUEUES)) {
         return bpf_redirect_map(&xsks_map, c->qid2xsk[qid], XDP_DROP);
