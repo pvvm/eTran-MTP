@@ -191,6 +191,7 @@ struct bpf_tcp_conn {
     __u32 last_ack;
     __u32 rate;
     __u32 send_una;
+    __u32 data_end;
 
     // used by XDP_REDIRECT
     // this value is updated when application calls open() or accept()

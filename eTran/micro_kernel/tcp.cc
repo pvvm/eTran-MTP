@@ -520,6 +520,7 @@ static int reg_tcp_conn_ebpf(struct tcp_connection *c, bool listen)
     ebpf_c.last_ack = c->remote_seq - 1; // Question: should we use c->remote_seq?
     ebpf_c.rate = window_to_rate(2 * 1448, TCP_RTT_INIT);
     ebpf_c.send_una = c->remote_seq - 1; // Question: should we use c->remote_seq?
+    ebpf_c.data_end = 0;
 
     for (unsigned int i = 0; i < c->tctx->actx->nr_nic_queues; i++)
     {

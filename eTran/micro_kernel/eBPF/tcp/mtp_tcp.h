@@ -197,7 +197,6 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
     // Does it make sense to send the app_event as an element of the TX metadata, and use
     // it in the EP implemented in XDP_EGRESS? I think it makes sense
     
-    // TODO: add data_end to context, in case the idea above makes sense
     __u32 data_rest = c->data_end - c->tx_next_seq;
     if(data_rest == 0 && ev->ack_seq == c->tx_next_seq) {
         // Question: here we should have a function call to cancel the timer.
@@ -336,7 +335,7 @@ static __always_inline int trim_and_handle_ooo(__u32 *seq, __u32 *payload_len, s
 static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta, __u32 cpu) {
 
     // Maybe remove this one if we simply use eTran's solution
-    if((c->rx_avail == 0 && ev.data_len > 0) ||
+    if((c->rx_avail == 0 && ev->data_len > 0) ||
        (ev->seq_num > c->rx_next_seq + c->rx_avail) ||
        (ev->seq_num + ev->data_len - 1 < c->rx_next_seq)) {
         return;
@@ -370,8 +369,8 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
     // And for c->rx_avail, which is the number of bytes available to recv (they treat it as the recv window size),
     // we do not change its in our code (it is constant). Meanwhile, in eTran they change it. What should we do here?
 
-    __u8 clear_ooo = false;
-    __u32 rx_bump = trim_and_handle_ooo(seq, payload_len, c, data_meta, int_out, &clear_ooo);
+    bool clear_ooo = false;
+    __u32 rx_bump = trim_and_handle_ooo(&seq, &payload_len, c, data_meta, int_out, &clear_ooo);
 
     // Question: maybe we'll need to use TCP_LOCK across the code.
     // It seems that this lock is used to access the context c, and it is acquired/released
@@ -473,5 +472,5 @@ static __always_inline int net_ev_dispatcher(struct net_event *ev, struct bpf_tc
         data_net_ep(ev, c, &int_out, data_meta, cpu);
         send_ack(ev, c, &int_out, data_meta, cpu);
     }
-    return int_out->drop ? XDP_DROP : XDP_REDIRECT;
+    return int_out.drop ? XDP_DROP : XDP_REDIRECT;
 }
