@@ -9,7 +9,9 @@
 #include "../ebpf_queue.h"
 #include "eTran_defs.h"
 #include "pacing.h"
+#include "common_funcs.h"
 #include "mtp_defs.h"
+#include "mtp_tcp.h"
 
 #define TCP_ACK_HEADER_CUTOFF (int)(XDP_GEN_PKT_SIZE - sizeof(struct ethhdr) - sizeof(struct iphdr) - sizeof(struct tcphdr) - TS_OPT_SIZE)
 
@@ -234,20 +236,6 @@ static __always_inline __u32 tcp_txavail(const struct bpf_tcp_conn *c)
     return c->rx_remote_avail - c->tx_sent;
 }
 
-static __always_inline void set_tcp_flag(struct tcphdr *tcph, __u16 len, __u16 flags)
-{
-    tcph->res1 = 0;
-    tcph->doff = len;
-    tcph->fin = (flags & TCP_FLAG_FIN) ? 1 : 0;
-    tcph->syn = (flags & TCP_FLAG_SYN) ? 1 : 0;
-    tcph->rst = (flags & TCP_FLAG_RST) ? 1 : 0;
-    tcph->psh = (flags & TCP_FLAG_PSH) ? 1 : 0;
-    tcph->ack = (flags & TCP_FLAG_ACK) ? 1 : 0;
-    tcph->urg = (flags & TCP_FLAG_URG) ? 1 : 0;
-    tcph->ece = (flags & TCP_FLAG_ECE) ? 1 : 0;
-    tcph->cwr = (flags & TCP_FLAG_CWR) ? 1 : 0;
-}
-
 // Fill IP header except for addresses
 static __always_inline void fill_ip_hdr(struct iphdr *iph, __u32 payload_len, bool ece)
 {
@@ -350,7 +338,8 @@ static __always_inline __u32 fast_retransmit(struct bpf_tcp_conn *c, struct bpf_
 }
 
 // Caller must hold bpf_spin_lock
-static __always_inline int tcp_tx_process(struct iphdr *iph, struct tcphdr *tcph, struct bpf_tcp_conn *c, struct meta_info *data_meta, void *data_end)
+static __always_inline int tcp_tx_process(struct iphdr *iph, struct tcphdr *tcph, struct bpf_tcp_conn *c, struct meta_info *data_meta, void *data_end,
+    struct app_timer_event *ev)
 {
     __u32 cpu = bpf_get_smp_processor_id();
     if (unlikely(cpu >= MAX_CPU))
@@ -447,13 +436,17 @@ static __always_inline int tcp_tx_process(struct iphdr *iph, struct tcphdr *tcph
 
     __u64 desired_tx_ts = cc_get_desired_tx_ts(cc, ref_ts, payload_len);
 
-    fill_tcp_hdr(iph, tcph, c, desired_tx_ts, data_end, 0);
-
-    //bpf_printk("%u", c->tx_next_seq);
-
+    #ifdef MTP_ON
+    struct interm_out int_out;
+    struct TCPBP bp = send_ep(ev, c, &int_out, data_meta);
+    mtp_fill_tcp_hdr(tcph, c, desired_tx_ts, data_end, 0, &bp);
     fill_ip_hdr(iph, payload_len, c->ecn_enable);
-
+    #else
+    fill_tcp_hdr(iph, tcph, c, desired_tx_ts, data_end, 0);
+    fill_ip_hdr(iph, payload_len, c->ecn_enable);
     c->tx_next_seq += payload_len;
+    #endif
+
     c->tx_next_pos += payload_len;
     if (c->tx_next_pos >= c->tx_buf_size)
         c->tx_next_pos -= c->tx_buf_size;

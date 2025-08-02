@@ -1,5 +1,5 @@
-/*#pragma once
-#include <bpf/bpf_helpers.h>
+#pragma once
+/*#include <bpf/bpf_helpers.h>
 #include <linux/bpf.h>
 #include <linux/types.h>
 
@@ -99,19 +99,65 @@ SEC(".bss.rx_cached_ts")
 __u64 rx_cached_ts[MAX_CPU];*/
 
 #include <stdlib.h>
-#include "tcp.h"
+#include "common_funcs.h"
 
-static __always_inline int app_ev_dispatcher(struct app_event *ev, struct bpf_tcp_conn *c, struct meta_info *data_meta) {
-    struct interm_out int_out;
-    int_out.drop = 1;
+// Fill TCP header excpet for ports
+static __always_inline void mtp_fill_tcp_hdr(struct tcphdr *tcph, struct bpf_tcp_conn *c, __u32 tgt_ts, void *data_end, __u16 flags,
+    struct TCPBP *bp)
+{
+    __u32 tx_seq = bp->seq_num;
+    __u32 rx_wnd = bp->rwnd_size;
+    __u32 ack_seq = bp->ack_seq;
+    __u32 ts_ecr = c->tx_next_ts;
+    struct tcp_timestamp_opt *ts_opt = (struct tcp_timestamp_opt *)(tcph + 1);
+    if (ts_opt + 1 > data_end) {
+        return;
+    }
+    __u16 len = 5 + TS_OPT_SIZE / 4;
+    /* fill tcp header */
+    tcph->seq = bpf_htonl(tx_seq);
+    tcph->ack_seq = bpf_htonl(ack_seq);
+    
+    set_tcp_flag(tcph, len, flags);
+    tcph->ack = bp->is_ack;
 
-    // TODO: implement the app EP, but (hopefully it will be the most straight to the point)
-    return 0;
+    ts_opt->kind = TCPI_OPT_TIMESTAMPS;
+    ts_opt->length = sizeof(*ts_opt) / 4;
+    ts_opt->ts_val = bpf_htonl(tgt_ts);
+    ts_opt->ts_ecr = bpf_htonl(ts_ecr);
+    
+    tcph->window = bpf_htons(rx_wnd) >> TCP_WND_SCALE;
+    tcph->urg_ptr = 0;
+
+    // Newer kernel has supported XDP_TXMD_FLAGS_CHECKSUM, ignore the overhead
+    tcph->check = 0;
 }
 
+static __always_inline struct TCPBP send_ep
+(struct app_timer_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta) {
+    c->data_end += ev->data_size;
 
-static __always_inline struct app_event parse_req_to_app_event(struct meta_info *data_meta) {
-    struct app_event ev;
+    struct TCPBP bp;
+    bp.src_port = c->local_port;
+    bp.dest_port = c->remote_port;
+    bp.seq_num = c->tx_next_seq;
+    bp.is_ack = false;
+
+    // Question: should be values not specified in MTP be filled here with default values by the compiler?
+    // For now, I'm filling with what they should have
+    bp.ack_seq = c->rx_next_seq;
+    bp.rwnd_size = c->rx_avail;
+
+    c->tx_next_seq += ev->data_size;
+
+    // TODO: add functions to initialize timers
+
+    return bp;
+}
+
+static __always_inline struct app_timer_event parse_req_to_app_event(struct meta_info *data_meta) {
+    struct app_timer_event ev;
+    ev.type = APP_EVENT;
     // Question: this could work, but the thing is that this is target-specific, i.e.
     // it is a part of eTran's TX metadata. Also, it is the length for that batch of packets
     // (given the userspace window)
@@ -119,6 +165,39 @@ static __always_inline struct app_event parse_req_to_app_event(struct meta_info 
     // using the metadata (how about some metadata after the payload?)
     ev.data_size = data_meta->tx.plen;
     return ev;
+}
+
+static __always_inline struct app_timer_event parse_req_to_timer_event(struct meta_info *data_meta) {
+    struct app_timer_event ev;
+    ev.type = TIMER_EVENT;
+    // Question: what will be set here is also a bit complex.
+    // What is in the timer event will be set and reset by EPs (send and ack), in addition to the
+    // timer itself. Meanwhile, the control path will keep track of the timer. When the timer is
+    // reached, it will need to send the timer event associated to that timer back here.
+    // Does that make sense? I wonder if there might be situations where it might be problematic
+
+    // ev.seq_num = data_meta->tx.;
+    return ev;
+}
+
+static __always_inline struct net_event parse_pkt_to_event(struct tcphdr *tcph, struct iphdr *iph) {
+    struct net_event ev;
+    // 1 == NET_EVENT_ACK, 0 == NET_EVENT_DATA
+    ev.minor_type = tcph->ack;
+    ev.ack_seq = bpf_ntohl(tcph->ack_seq);
+    ev.rwnd_size = bpf_ntohs(tcph->window);
+    ev.seq_num = bpf_ntohl(tcph->seq);
+    ev.data_len = bpf_ntohs(iph->tot_len) - (sizeof(struct iphdr) + sizeof(struct tcphdr) + TS_OPT_SIZE);
+    return ev;
+}
+
+#ifndef MTP_ON
+static __always_inline int app_ev_dispatcher(struct app_timer_event *ev, struct bpf_tcp_conn *c, struct meta_info *data_meta) {
+    struct interm_out int_out;
+    int_out.drop = 1;
+
+    // TODO: implement the app EP, but (hopefully it will be the most straight to the point)
+    return 0;
 }
 
 
@@ -146,35 +225,12 @@ static __always_inline void ack_timeout_ep(struct net_event *ev, struct bpf_tcp_
     int_out->drop = 0;
 }
 
-static __always_inline int timer_ev_dispatcher(struct timer_event *ev, struct bpf_tcp_conn *c, struct meta_info *data_meta) {
+static __always_inline int timer_ev_dispatcher(struct app_timer_event *ev, struct bpf_tcp_conn *c, struct meta_info *data_meta) {
     struct interm_out int_out;
     int_out.drop = 1;
     ack_timeout_ep(ev, c, &int_out, data_meta);
 
     return int_out.drop ? XDP_DROP : XDP_PASS;
-}
-
-static __always_inline struct timer_event parse_req_to_timer_event(struct meta_info *data_meta) {
-    struct timer_event ev;
-    // Question: what will be set here is also a bit complex.
-    // What is in the timer event will be set and reset by EPs (send and ack), in addition to the
-    // timer itself. Meanwhile, the control path will keep track of the timer. When the timer is
-    // reached, it will need to send the timer event associated to that timer back here.
-    // Does that make sense? I wonder if there might be situations where it might be problematic
-
-    // ev.seq_num = data_meta->tx.;
-    return ev;
-}
-
-static __always_inline struct net_event parse_pkt_to_event(struct tcphdr *tcph, struct iphdr *iph) {
-    struct net_event ev;
-    // 1 == NET_EVENT_ACK, 0 == NET_EVENT_DATA
-    ev.minor_type = tcph->ack;
-    ev.ack_seq = bpf_ntohl(tcph->ack_seq);
-    ev.rwnd_size = bpf_ntohs(tcph->window);
-    ev.seq_num = bpf_ntohl(tcph->seq);
-    ev.data_len = bpf_ntohs(iph->tot_len) - (sizeof(struct iphdr) + sizeof(struct tcphdr) + TS_OPT_SIZE);
-    return ev;
 }
 
 static __always_inline void rto_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta, __u32 cpu) {
@@ -555,3 +611,4 @@ static __always_inline int net_ev_dispatcher(struct net_event *ev, struct bpf_tc
     }
     return int_out.drop ? XDP_DROP : XDP_REDIRECT;
 }
+#endif

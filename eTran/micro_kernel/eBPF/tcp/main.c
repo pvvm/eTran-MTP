@@ -222,20 +222,24 @@ int xdp_egress_prog(struct xdp_md *ctx)
         goto err_pkt;
     }
 
-    ret = tcp_tx_process(iph, tcph, c, data_meta, data_end);
+    struct app_timer_event ev;
 
+    #ifdef MTP_ON
     // Question: this comparison to check if it is a timeout flag might be
     // problematic. This is because this flag represent the idea of timeout as a whole, i.e.
     // if we had multiple timers, they would all be represented by this one.
     // But the problem is that changing the metadata will probably be difficult. Again, the
     // problem with the metadata
     if (unlikely(data_meta->tx.flag & FLAG_TO)) {
-        struct timer_event ev = parse_req_to_timer_event(data_meta);
+        ev = parse_req_to_timer_event(data_meta);
         //ret = app_ev_dispatcher(&ev, c, data_meta);
     } else {
-        struct app_event ev = parse_req_to_app_event(data_meta);
+        ev = parse_req_to_app_event(data_meta);
         //ret = timer_ev_dispatcher(&ev, c, data_meta);
     }
+    #endif
+
+    ret = tcp_tx_process(iph, tcph, c, data_meta, data_end, &ev);
 
     if (ret == XDP_DROP) {
         if (data_meta->tx.flag) {

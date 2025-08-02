@@ -1,8 +1,23 @@
 #ifndef MTP_DEFS_H
 #define MTP_DEFS_H
 
+// Comment this to turn off MTP functions
+#define MTP_ON 1
+
 #define NET_EVENT_ACK 1
 #define NET_EVENT_DATA 0
+
+#define APP_EVENT 1
+#define TIMER_EVENT 0
+
+struct TCPBP {
+    __u16 src_port;
+    __u16 dest_port;
+    __u32 seq_num;
+    __u32 ack_seq;
+    bool is_ack;
+    __u16 rwnd_size;
+};
 
 struct interm_out {
     __u8 change_cwnd;
@@ -11,14 +26,15 @@ struct interm_out {
     __u8 drop;
 };
 
-struct app_event {
+// Represents APP and TIMER events in XDP
+struct app_timer_event {
+    __u8 type;
+    // APP fields
     __u32 data_size;
-};
 
-struct timer_event {
+    // TIMER fields
     __u32 seq_num;
 };
-
 struct net_event {
     __u8 minor_type;
     // ACK
