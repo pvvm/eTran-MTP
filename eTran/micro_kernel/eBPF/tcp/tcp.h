@@ -645,7 +645,8 @@ static __always_inline int tcp_valid_rxseq(struct bpf_tcp_conn *c, __u32 seq, __
     return 0;
 }
 
-static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_conn *c, __u32 pkt_len, struct meta_info *data_meta, bool ece, __u32 cpu)
+static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_conn *c, __u32 pkt_len, struct meta_info *data_meta, bool ece, __u32 cpu,
+    struct net_event *ev)
 {
     bool trigger_ack = false;
     __u32 go_back_pos = 0;
@@ -700,6 +701,15 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
 
     TCP_LOCK(c);
     
+    struct interm_out int_out;
+    #ifdef MTP_ON
+    if(ev->minor_type == NET_EVENT_ACK) {
+        cc->cnt_rx_acks++;
+        go_back_pos = fast_retr_rec_ep(ev, c, &int_out, data_meta, cpu, cc, &tx_bump);
+        if(go_back_pos > 0)
+            goto unlock;
+    }
+    #else
     /* ACK processing */
     if (tcph->ack == 1) {
         // update CC
@@ -740,6 +750,7 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
             goto unlock;
         }
     }
+    #endif
 
     /* Payload validation */
     #ifdef OOO_RECV

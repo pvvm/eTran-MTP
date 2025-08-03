@@ -388,7 +388,7 @@ int xdp_sock_prog(struct xdp_md *ctx)
 
     data_meta->rx.conn = c->opaque_connection;
 
-    ret = tcp_rx_process(tcph, c, pkt_len, data_meta, (iph->tos & IPTOS_ECN_CE) == IPTOS_ECN_CE, cpu);
+    ret = tcp_rx_process(tcph, c, pkt_len, data_meta, (iph->tos & IPTOS_ECN_CE) == IPTOS_ECN_CE, cpu, &ev);
 
     //net_ev_dispatcher(&ev, c, data_meta, cpu);
     

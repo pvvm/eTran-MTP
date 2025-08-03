@@ -118,6 +118,7 @@ struct bpf_cc {
     __u32 rtt_est;
     /** has pending tx data? */
     __u32 txp;
+    //__u32 cwnd_size;
 } __attribute__((packed, aligned(32)));
 #ifdef __cplusplus
 static_assert(sizeof(struct bpf_cc) == 32, "bpf_cc size is not 32 bytes");

@@ -47,6 +47,7 @@ struct net_event {
 
     // SHARED
     __u32 seq_num;
+    bool ecn_mark;
 };
 
 #endif
