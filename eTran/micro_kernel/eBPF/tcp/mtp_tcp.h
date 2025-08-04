@@ -194,7 +194,7 @@ static __always_inline struct net_event parse_pkt_to_event(struct tcphdr *tcph, 
 }
 
 // TODO: remove this tx_nump after the ACK chain is done
-/*static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
+static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
     __u32 cpu, struct bpf_cc *cc) {
     //bpf_printk("%u %u %u", ev->ack_seq, c->send_una, c->tx_next_seq);
     //if(ev->ack_seq < c->send_una || c->tx_next_seq < ev->ack_seq) {
@@ -214,7 +214,6 @@ static __always_inline struct net_event parse_pkt_to_event(struct tcphdr *tcph, 
     
     if (exp_ack_first <= exp_ack_last) {
         if (ev->ack_seq < exp_ack_first || ev->ack_seq > exp_ack_last) {
-            bpf_printk("TESTE1");
             return;
         }
 
@@ -222,15 +221,19 @@ static __always_inline struct net_event parse_pkt_to_event(struct tcphdr *tcph, 
         int_out->num_acked_bytes = ev->ack_seq - exp_ack_first;
     } else {
         if (exp_ack_first > ev->ack_seq && ev->ack_seq > exp_ack_last) {
-            bpf_printk("TESTE2");
             return;
         }
         // 0-----exp_ack_first-----------------exp_ack_first--ack_seq---__UINT32_MAX__
         // 0--ack_seq---exp_ack_first-----------------exp_ack_first-----__UINT32_MAX__
         int_out->num_acked_bytes = ev->ack_seq - exp_ack_first;
     }
-    if(int_out->num_acked_bytes > c->tx_sent)
-        bpf_printk("TESTE3");
+    if(int_out->num_acked_bytes > c->tx_sent) {
+        int_out->num_acked_bytes = 0;
+        return;
+    }
+    
+    // Redirect it to userspace
+    int_out->drop = 0;
 
     // Question: we need to have a way to differentiate context fields that are shared and those that aren't
     // between userspace and XDP (maybe those used in timer events?)
@@ -252,7 +255,6 @@ static __always_inline struct net_event parse_pkt_to_event(struct tcphdr *tcph, 
         int_out->change_cwnd = 0;
         c->rx_dupack_cnt += 1;
         if(c->rx_dupack_cnt == 3) {
-            bpf_printk("AQUI CARALHO");
             // TODO: comment this one later after ack_net_ep is done (we only zero rx_dupack_cnt there in MTP)
             c->rx_dupack_cnt = 0;
 
@@ -292,117 +294,14 @@ static __always_inline struct net_event parse_pkt_to_event(struct tcphdr *tcph, 
     }
 
     int_out->go_back_bytes = go_back_bytes;
-    c->send_una = ev->ack_seq;
-}*/
-
-static __always_inline __u32 fast_retr_rec_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
-    __u32 cpu, struct bpf_cc *cc, __u32 *tx_bump) {
-    //bpf_printk("%u %u %u", ev->ack_seq, c->send_una, c->tx_next_seq);
-    /*if(ev->ack_seq < c->send_una || c->tx_next_seq < ev->ack_seq) {
-        int_out->skip_ack_eps = 1;
-        return 0;
-    }*/
-
-    // Question: in eTran the __u32-long values like tx_next_seq, send_una, etc, quickly
-    // reach the limit of this size, which result in them requiring this part.
-    // But in ours we didn't have something that complex. Are we doing something wrong?
-    __u32 exp_ack_first = c->send_una;
-    __u32 exp_ack_last = c->tx_next_seq;
-
-    // allow receving ack that we haven't sent yet, this is probably caused by retransmission
-    exp_ack_last += c->tx_pending;
-    
-    if (exp_ack_first <= exp_ack_last) {
-        if (ev->ack_seq < exp_ack_first || ev->ack_seq > exp_ack_last)
-            return -1;
-
-        // 0-----exp_ack_first-----ack_seq-----exp_ack_last-----__UINT32_MAX__
-        *tx_bump = ev->ack_seq - exp_ack_first;
-    } else {
-        if (exp_ack_first > ev->ack_seq && ev->ack_seq > exp_ack_last)
-            return -1;
-        // 0-----exp_ack_first-----------------exp_ack_first--ack_seq---__UINT32_MAX__
-        // 0--ack_seq---exp_ack_first-----------------exp_ack_first-----__UINT32_MAX__
-        *tx_bump = ev->ack_seq - exp_ack_first;
-    }
-
-    __u32 num_acked_bytes = *tx_bump;
-    // Question: we need to have a way to differentiate context fields that are shared and those that aren't
-    // between userspace and XDP (maybe those used in timer events?)
-    cc->cnt_rx_ack_bytes += num_acked_bytes;
-    if(ev->ecn_mark)
-        cc->cnt_rx_ecn_bytes += num_acked_bytes;
-
-    // Question: this field tx_sent is widely used in their code. Should we simply use it in MTP too?
-    c->tx_sent -= num_acked_bytes;
-    cc->txp = c->tx_sent > 0;
-
-    int_out->change_cwnd = 1;
-
-    __u32 go_back_bytes = 0;
-    // Question: the way they do this check is a bit different.
-    // It seems that they get the number of bytes acknowledged in the ack, and enter the condition if it's zero
-    // Should we do the same?
-    if(ev->ack_seq == c->last_ack) {
-        int_out->change_cwnd = 0;
-        c->rx_dupack_cnt += 1;
-        if(c->rx_dupack_cnt == 3) {
-            // TODO: uncomment this one later after ack_net_ep is done (we only zero rx_dupack_cnt there in MTP)
-            c->rx_dupack_cnt = 0;
-
-            go_back_bytes = c->tx_next_seq - c->send_una;
-            c->tx_next_seq -= go_back_bytes;
-            if (c->tx_next_pos >= go_back_bytes) {
-                c->tx_next_pos -= go_back_bytes;
-            } else {
-                c->tx_next_pos = c->tx_buf_size - (go_back_bytes - c->tx_next_pos);
-            }
-
-            // Question: this section of code isn't covered in MTP (is used by the other parts of the code)
-            // If everything works out by adding our EPs, we can remove this part safely
-            c->tx_pending = 0;
-            c->rx_remote_avail += go_back_bytes;
-            c->tx_sent = 0;
-            cc->txp = 0;
-
-            // Question: in eTran they don't decrease the DCTCP window both in fast retransmission and timeout.
-            // They confirmed it is a bug.
-            // Should we decrease the window here? But by how much, considering that the rate is cut by half
-            // in their implementation?
-            // But window will need to be shared with userspace too
-            if(cc->cnt_tx_drops == 0) {
-                cc->rate >>= 1;
-                //cc->cwnd_size >>= 1;
-            }
-
-            cc->cnt_tx_drops++;
-            // Question: in MTP we would have a set_rate function here.
-            // But this rate would only be used in XDP_EGRESS and enqueueing the packets to the timing wheel
-            // Can we consider the compiler would simply ignore the function?
-        }
-    } else {
-        c->rx_dupack_cnt = 0;
-        c->last_ack = ev->ack_seq;
-    }
-    /*---------------- VERY IMPORTANT TO REMEMBER ----------------*/
-    /*---------------- VERY IMPORTANT TO REMEMBER ----------------*/
-    /*---------------- VERY IMPORTANT TO REMEMBER ----------------*/
-    // TODO: remove this when ack_net_ep is complete
-    c->send_una = ev->ack_seq;
-    return go_back_bytes;
-    /*---------------- VERY IMPORTANT TO REMEMBER ----------------*/
-    /*---------------- VERY IMPORTANT TO REMEMBER ----------------*/
-    /*---------------- VERY IMPORTANT TO REMEMBER ----------------*/
+    //c->send_una = ev->ack_seq;
 }
 
 static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
     __u32 cpu, struct bpf_cc *cc) {
-    /*if(int_out->skip_ack_eps)
+    if(int_out->drop)
         return;
-    bpf_printk("%d %d %d", ev->ack_seq, c->send_una, c->tx_next_seq);
-    
-    // Redirect it to userspace
-    int_out->drop = 0;
+    //bpf_printk("%d %d %d", ev->ack_seq, c->send_una, c->tx_next_seq);
 
     if(c->rx_dupack_cnt == 3) {
         c->rx_dupack_cnt = 0;
@@ -428,8 +327,9 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
     // Question (not really):
     // Think about how we'll deal with the if(ctx.lwu_seq < ev.seq_num...) here, and so on
     // __u32 rwindow = ev->rwnd_size << TCP_WND_SCALE;
-    c->rx_remote_avail = ev->rwnd_size << TCP_WND_SCALE;
-        */
+    if(int_out->num_acked_bytes || c->rx_remote_avail < (ev->rwnd_size << TCP_WND_SCALE))
+        c->rx_remote_avail = ev->rwnd_size << TCP_WND_SCALE;
+    
     // Question: same from MTP file. Do we have a function to get current timestamps in MTP?
     if(ev->ts_ecr && int_out->num_acked_bytes) {
         __u32 now = now = bpf_ktime_get_ns();
@@ -468,7 +368,7 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
     // Question: in eTran they simply send number of ack_bytes to userspace
     // by redirecting it back as a metadata. It doesn't have something like the whole flush idea.
     // Maybe we can assume that the last argument of tx_data_flush will be used in rx.ack_bytes?
-    /*__u32 rmlen = int_out->num_acked_bytes;
+    __u32 rmlen = int_out->num_acked_bytes;
     if(rmlen > 0) {
         data_meta->rx.ack_bytes = rmlen;
         data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
@@ -476,7 +376,7 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
         data_meta->rx.poff = POISON_16;
         data_meta->rx.plen = POISON_16;
         c->send_una = ev->ack_seq;
-    }*/
+    }
     // TODO: add timer instruction to restart the timeout timer
 }
 

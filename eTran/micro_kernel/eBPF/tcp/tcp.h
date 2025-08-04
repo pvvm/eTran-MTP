@@ -698,28 +698,29 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
     
     struct interm_out int_out;
     #ifdef MTP_ON
-    /*if(ev->minor_type == NET_EVENT_ACK) {
+    if(ev->minor_type == NET_EVENT_ACK) {
         cc->cnt_rx_acks++;
         fast_retr_rec_ep(ev, c, &int_out, data_meta, cpu, cc);
         
         // TODO: remove this later
         tx_bump = int_out.num_acked_bytes;
         go_back_pos = int_out.go_back_bytes;
+        bpf_printk("%u %u", tx_bump, go_back_pos);
         if(go_back_pos > 0)
             goto unlock;
         ack_net_ep(ev, c, &int_out, data_meta, cpu, cc);
 
-        //TCP_UNLOCK(c);
-        //return int_out.drop ? XDP_DROP : XDP_REDIRECT;
-    }*/
-    if(ev->minor_type == NET_EVENT_ACK) {
+        TCP_UNLOCK(c);
+        return int_out.drop ? XDP_DROP : XDP_REDIRECT;
+    }
+    /*if(ev->minor_type == NET_EVENT_ACK) {
         cc->cnt_rx_acks++;
         go_back_pos = fast_retr_rec_ep(ev, c, &int_out, data_meta, cpu, cc, &tx_bump);
         if(go_back_pos > 0)
             goto unlock;
 
         ack_net_ep(ev, c, &int_out, data_meta, cpu, cc);
-    }
+    }*/
     #else
     /* ACK processing */
     if (tcph->ack == 1) {
