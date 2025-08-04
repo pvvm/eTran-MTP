@@ -355,18 +355,20 @@ int xdp_sock_prog(struct xdp_md *ctx)
         goto slowpath;
     }
 
-    struct net_event ev = parse_pkt_to_event(tcph, iph);
-
-    // Question: sometimes the sender receives packets carrying 100 bytes of data (not ack).
-    // Why is that?
-
-    //bpf_printk("%u, %u, %u, %u", ev.minor_type, ev.seq_num, ev.data_len, ev.ack_seq); 
-
     struct tcp_timestamp_opt *ts_opt = (struct tcp_timestamp_opt *)(tcph + 1);
     if (unlikely(ts_opt + 1 > data_end)) {
         xdp_log_err("ts_opt + 1 > data_end");
         return XDP_DROP;
     }
+
+    struct net_event ev = parse_pkt_to_event(tcph, iph, ts_opt);
+
+    // Question: sometimes the sender receives packets carrying 100 bytes of data (not ack).
+    // Why is that?
+
+    if(ev.data_len > 0 && ev.minor_type == NET_EVENT_ACK)
+        bpf_printk("CASE HERE");
+    //bpf_printk("%u, %u, %u, %u", ev.minor_type, ev.seq_num, ev.data_len, ev.ack_seq); 
 
     key.local_ip = bpf_ntohl(iph->daddr);
     key.remote_ip = bpf_ntohl(iph->saddr);

@@ -225,11 +225,6 @@ static __always_inline int enqueue_ack(struct bpf_tcp_conn *c, struct bpf_tcp_ac
     return 0;
 }
 
-static __always_inline __u32 xsk_budget_avail(const struct bpf_tcp_conn *c)
-{
-    return c->rx_remote_avail;
-}
-
 static __always_inline __u32 tcp_txavail(const struct bpf_tcp_conn *c)
 {
     /* flow control window */
@@ -703,11 +698,27 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
     
     struct interm_out int_out;
     #ifdef MTP_ON
+    /*if(ev->minor_type == NET_EVENT_ACK) {
+        cc->cnt_rx_acks++;
+        fast_retr_rec_ep(ev, c, &int_out, data_meta, cpu, cc);
+        
+        // TODO: remove this later
+        tx_bump = int_out.num_acked_bytes;
+        go_back_pos = int_out.go_back_bytes;
+        if(go_back_pos > 0)
+            goto unlock;
+        ack_net_ep(ev, c, &int_out, data_meta, cpu, cc);
+
+        //TCP_UNLOCK(c);
+        //return int_out.drop ? XDP_DROP : XDP_REDIRECT;
+    }*/
     if(ev->minor_type == NET_EVENT_ACK) {
         cc->cnt_rx_acks++;
         go_back_pos = fast_retr_rec_ep(ev, c, &int_out, data_meta, cpu, cc, &tx_bump);
         if(go_back_pos > 0)
             goto unlock;
+
+        ack_net_ep(ev, c, &int_out, data_meta, cpu, cc);
     }
     #else
     /* ACK processing */
@@ -818,15 +829,18 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
 
     #endif
 
+    #ifndef MTP_ON
     if (likely(tx_bump || (c->rx_remote_avail < ((bpf_ntohs(tcph->window)) << TCP_WND_SCALE)))) {
         /* update TCP receive window */
         c->rx_remote_avail = (bpf_ntohs(tcph->window)) << TCP_WND_SCALE;
         // bpf_printk("(%u),ack_seq(%u), c->rx_remote_avail(%u), c->tx_sent(%u)", tx_bump, ack_seq, c->rx_remote_avail, c->tx_sent);
     }
+    #endif
     
     /* update RTT estimate */
     if (payload_len && !c->tx_next_ts)
         c->tx_next_ts = ts_val;
+    #ifndef MTP_ON
     if (likely(tcph->ack == 1 && ts_ecr && tx_bump)) {
         // RTT = t{completion} - t{sent} - t{serialization}
         __u32 rtt = (now - ts_ecr);
@@ -840,6 +854,7 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
                 cc->rtt_est = rtt;
         }
     }
+    #endif
 
     /* update TCP state if we have payload */
     if (likely(payload_len)) {

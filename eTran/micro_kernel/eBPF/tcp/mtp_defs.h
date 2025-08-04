@@ -24,6 +24,8 @@ struct interm_out {
     __u8 skip_ack_eps;
     __u8 trigger_ack;
     __u8 drop;
+    __u32 num_acked_bytes;
+    __u32 go_back_bytes;
 };
 
 // Represents APP and TIMER events in XDP
@@ -40,6 +42,7 @@ struct net_event {
     // ACK
     __u32 ack_seq;
     __u32 rwnd_size;
+    __u32 ts_ecr;
 
     // DATA
     // Question: how are we representing hold_addr?
