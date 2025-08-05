@@ -487,13 +487,17 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
     __u32 cpu, struct bpf_cc *cc) {
 
     // Maybe remove this one if we simply use eTran's solution
-    if((c->rx_avail == 0 && ev->data_len > 0) ||
+    // Question: similar to the problem before that in eTran the __u32-long values
+    // quickly reach the limit of this size. (Which we didn't have a problem with strangely)
+    // Because of that, the this simple check below might cause packets to be dropped when 
+    // 4294500000B is reached
+    /*if((c->rx_avail == 0 && ev->data_len > 0) ||
        (ev->seq_num > c->recv_next + c->rx_avail) ||
        (ev->seq_num + ev->data_len - 1 < c->recv_next)) {
         // Question: the eBPF verifier announces an error if this print isn't here???????
         bpf_printk("What the hell");
         return;
-    }
+    }*/
 
     // Question: my idea here is to abstract the sliding window with this whole
     // trimming and handling OOO algorithm from eTran. Does this sound fair?
