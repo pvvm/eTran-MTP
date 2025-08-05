@@ -4,6 +4,38 @@
 
 #define TCP_WND_SCALE 3
 
+// ACK
+// emulate a per-cpu SCSP queue with BPF_MAP_TYPE_PERCPU_ARRAY
+/*struct bpf_tcp_ack {
+    __u32 local_ip;
+    __u32 remote_ip;
+    __u16 local_port;
+    __u16 remote_port;
+
+    __u32 seq; // tx_next_seq
+    __u32 ack; // rx_next_seq
+    __u32 rxwnd; // rx_avail
+
+    __u32 ts_val; // now
+    __u32 ts_ecr; // tx_next_ts
+
+    __u8 ecn_flags;
+
+    // MTP-only entries
+    __u8 is_ack;    // Question: it isn't necessary, but just to make it match with MTP
+};
+
+struct {
+  __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+  __uint(max_entries, NAPI_BATCH_SIZE);
+  __type(key, __u32);
+  __type(value, struct bpf_tcp_ack);
+} bpf_tcp_ack_map SEC(".maps");
+
+SEC(".bss.ack_prod")
+__u32 ack_prod[MAX_CPU];
+SEC(".bss.ack_cons")
+__u32 ack_cons[MAX_CPU];*/
 
 static __always_inline void set_tcp_flag(struct tcphdr *tcph, __u16 len, __u16 flags)
 {

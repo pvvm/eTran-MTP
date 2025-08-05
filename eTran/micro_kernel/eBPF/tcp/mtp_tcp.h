@@ -1,102 +1,4 @@
 #pragma once
-/*#include <bpf/bpf_helpers.h>
-#include <linux/bpf.h>
-#include <linux/types.h>
-
-#include <intf/intf_ebpf.h>
-
-#include "../ebpf_utils.h"
-#include "../ebpf_queue.h"
-#include "eTran_defs.h"
-#include "pacing.h"
-#include "mtp_defs.h"
-
-#define TCP_ACK_HEADER_CUTOFF (int)(XDP_GEN_PKT_SIZE - sizeof(struct ethhdr) - sizeof(struct iphdr) - sizeof(struct tcphdr) - TS_OPT_SIZE)
-
-#if defined(XDP_DEBUG) || defined(XDP_EGRESS_DEBUG) || defined(XDP_GEN_DEBUG)
-#define TCP_LOCK(c)
-#define TCP_UNLOCK(c)
-#else
-// #define TCP_LOCK(c)
-// #define TCP_UNLOCK(c)
-#define TCP_LOCK(c) bpf_spin_lock(&c->lock)
-#define TCP_UNLOCK(c) bpf_spin_unlock(&c->lock)
-#endif
-
-#define NULL_CONN __UINT32_MAX__
-// we use cc_idx to identify each connection
-// TODO: much more configurable
-SEC(".data.prev_conn")
-__u32 prev_conn[MAX_CPU] = {__UINT32_MAX__, __UINT32_MAX__, __UINT32_MAX__, __UINT32_MAX__, __UINT32_MAX__,
-                            __UINT32_MAX__, __UINT32_MAX__, __UINT32_MAX__, __UINT32_MAX__, __UINT32_MAX__,
-                            __UINT32_MAX__, __UINT32_MAX__, __UINT32_MAX__, __UINT32_MAX__, __UINT32_MAX__,
-                            __UINT32_MAX__, __UINT32_MAX__, __UINT32_MAX__, __UINT32_MAX__, __UINT32_MAX__,
-};
-__u32 prev_conn_li[MAX_CPU];
-__u16 prev_conn_lp[MAX_CPU];
-__u32 prev_conn_ri[MAX_CPU];
-__u16 prev_conn_rp[MAX_CPU];
-__u8 prev_conn_ece[MAX_CPU];
-
-// FIXME 
-#define TCP_WND_SCALE 3
-
-#define TCP_OPT_END_OF_OPTIONS 0
-#define TCP_OPT_NO_OP 1
-#define TCP_OPT_MSS 2
-#define TCP_OPT_TIMESTAMP 8
-
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __type(key, struct ebpf_flow_tuple);
-    __type(value, struct bpf_tcp_conn);
-    __uint(max_entries, MAX_TCP_FLOWS);
-} bpf_tcp_conn_map SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __type(key, __u32);
-    __type(value, struct bpf_cc);
-    __uint(max_entries, MAX_TCP_FLOWS);
-    __uint(map_flags, BPF_F_MMAPABLE);
-} bpf_cc_map SEC(".maps");
-
-// ACK
-// emulate a per-cpu SCSP queue with BPF_MAP_TYPE_PERCPU_ARRAY
-// TODO: adapt this to a pkt_bp that generates acks
-struct bpf_tcp_ack {
-    __u32 local_ip;
-    __u32 remote_ip;
-    __u16 local_port;
-    __u16 remote_port;
-
-    __u32 seq; // tx_next_seq
-    __u32 ack; // rx_next_seq
-    __u32 rxwnd; // rx_avail
-
-    __u32 ts_val; // now
-    __u32 ts_ecr; // tx_next_ts
-
-    __u8 ecn_flags;
-};
-
-struct {
-    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, NAPI_BATCH_SIZE);
-    __type(key, __u32);
-    __type(value, struct bpf_tcp_ack);
-} bpf_tcp_ack_map SEC(".maps");
-
-SEC(".bss.ack_prod")
-__u32 ack_prod[MAX_CPU];
-SEC(".bss.ack_cons")
-__u32 ack_cons[MAX_CPU];
-
-SEC(".bss.tx_cached_ts")
-__u64 tx_cached_ts[MAX_CPU];
-
-SEC(".bss.rx_cached_ts")
-__u64 rx_cached_ts[MAX_CPU];*/
 
 #include <stdlib.h>
 #include "common_funcs.h"
@@ -308,13 +210,11 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
         // Question: this part is quite weird.
         // To notify the userspace to retransmit the packets (with go-back-N), eTran simply
         // marks the ACK packet with this flag and specify the number of bytes to go back
-        // (with c->send_una, after it was decreased in fast_retransmit).
+        // (c->tx_next_seq - c->send_una).
         // But how would the compiler be able to convert that whole pkt_bp creation,
         // pkt_gen_instr, and so on, into this?
-        // This doesn't look very general, but in case a pkt_bp is generated in a
-        // NET event EP for an unseg_data:
-        // Maybe we can assume that rx.go_back_pos will be the second argument of the
-        // fourth argument of unseg_data, specifying where the new seq_nums will start from.
+        // The main problem is that none of the arguments of unseg_data match with a
+        // go_back_bytes value, which is the only relevant value to send back to userspace.
         data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
         data_meta->rx.go_back_pos = int_out->go_back_bytes;
         data_meta->rx.go_back_pos |= RECOVERY_MASK;
@@ -550,26 +450,7 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
     }
 }
 
-/*static __always_inline void send_ack(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta, __u32 cpu) {
-    if(!int_out->trigger_ack) {
-        return;
-    }
-    
-    // Question: eTran has two ways to generate ACKs. One ACK per arriving packet and
-    // ACK coalescing. It seems that they use ACK coalescing by default.
-    // On one hand, using ACK coalescing might be useful to compare with an "optimized" eTran,
-    // and might also be useful to see how that can be implemented in MTP.
-    // However, the way they trigger the ACK enqueue is a bit different from our approach.
-    // An ACK is enqueued if: the current packet's flow is different from the last, which
-    // results in enqueueing values from the previous packet's context; or if XDP_GEN runs,
-    // meaning a NAPI batch is finished.
-    // But how can we represent these ideas in MTP? Storing flow IDs between packets may be
-    // a bit contrived, and I think that the context wouldn't serve for that, since it's per-flow.
-    // And MTP won't have a way to understand a NAPI batch.
-
-    // Looks to me that using the per-packet ACK would better match what we have and,
-    // probably, MTP. I'll be following this approach for now
-
+/*static __always_inline void mtp_pkt_gen_for_xdp_gen(struct TCPBP bp, struct bpf_tcp_conn *c,  __u32 cpu) {
     struct bpf_tcp_ack *ack = NULL;
     __u32 prod = ack_prod[cpu];
     __u32 cons = ack_cons[cpu];
@@ -599,6 +480,41 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
     c->tx_next_ts = 0;
 
     ack_prod[cpu] = (ack_prod[cpu] + 1) & (NAPI_BATCH_SIZE - 1);
+}
+
+static __always_inline void send_ack(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
+    __u32 cpu, struct bpf_cc *cc) {
+    if(!int_out->trigger_ack) {
+        return;
+    }
+    
+    // Question: eTran has two ways to generate ACKs. One ACK per arriving packet and
+    // ACK coalescing. It seems that they use ACK coalescing by default.
+    // On one hand, using ACK coalescing might be useful to compare with an "optimized" eTran,
+    // and might also be useful to see how that can be implemented in MTP.
+    // However, the way they trigger the ACK enqueue is a bit different from our approach.
+    // An ACK is enqueued if: the current packet's flow is different from the last, which
+    // results in enqueueing values from the previous packet's context; or if XDP_GEN runs,
+    // meaning a NAPI batch is finished.
+    // But how can we represent these ideas in MTP? Storing flow IDs between packets may be
+    // a bit contrived, and I think that the context wouldn't serve for that, since it's per-flow.
+    // And MTP won't have a way to understand a NAPI batch.
+
+    // Looks to me that using the per-packet ACK would better match what we have and,
+    // probably, MTP. I'll be following this approach for now
+
+    struct TCPBP bp;
+    bp.src_port = c->local_port;
+    bp.dest_port = c->remote_port;
+    bp.seq_num = c->tx_next_seq;
+    bp.is_ack = 1;
+    // TODO: maybe change to rx_next_seq, depending on how we implement the 
+    bp.ack_seq = c->recv_next;
+    bp.rwnd_size = c->rx_avail;
+
+    // Question: this function will be equivalent to pkt_gen_instruction when the pkt_bp
+    // doesn't have data (goes to XDP_GEN)
+    mtp_pkt_gen_for_xdp_gen(bp, c, cpu);
 }*/
 
 #if 0
