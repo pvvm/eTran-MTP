@@ -332,7 +332,7 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
     
     // Question: same from MTP file. Do we have a function to get current timestamps in MTP?
     if(ev->ts_ecr && int_out->num_acked_bytes) {
-        __u32 now = now = bpf_ktime_get_ns();
+        __u32 now = bpf_ktime_get_ns();
         __u32 rtt = (now - ev->ts_ecr);
         rtt /= 1000; // microseconds
         rtt -= (int_out->num_acked_bytes * 1000000) / LINK_BANDWIDTH;
@@ -490,7 +490,8 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
     if((c->rx_avail == 0 && ev->data_len > 0) ||
        (ev->seq_num > c->recv_next + c->rx_avail) ||
        (ev->seq_num + ev->data_len - 1 < c->recv_next)) {
-        bpf_printk("AQUIIIII");
+        // Question: the eBPF verifier announces an error if this print isn't here???????
+        bpf_printk("What the hell");
         return;
     }
 
@@ -508,6 +509,8 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
     // never change this value. Can we assume that set() method might be able
     // to change the RX window size?
     // Also, we probably need to add a varying RX window size to match with eTran?
+
+    // Question: the trigger_ack boolean is also changed here. What to do in this case?
 
     bool clear_ooo = false;
     __u32 rx_bump = trim_and_handle_ooo(ev->seq_num, &ev->data_len, c, data_meta, int_out, &clear_ooo);
@@ -542,6 +545,57 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
         }
     }
 }
+
+/*static __always_inline void send_ack(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta, __u32 cpu) {
+    if(!int_out->trigger_ack) {
+        return;
+    }
+    
+    // Question: eTran has two ways to generate ACKs. One ACK per arriving packet and
+    // ACK coalescing. It seems that they use ACK coalescing by default.
+    // On one hand, using ACK coalescing might be useful to compare with an "optimized" eTran,
+    // and might also be useful to see how that can be implemented in MTP.
+    // However, the way they trigger the ACK enqueue is a bit different from our approach.
+    // An ACK is enqueued if: the current packet's flow is different from the last, which
+    // results in enqueueing values from the previous packet's context; or if XDP_GEN runs,
+    // meaning a NAPI batch is finished.
+    // But how can we represent these ideas in MTP? Storing flow IDs between packets may be
+    // a bit contrived, and I think that the context wouldn't serve for that, since it's per-flow.
+    // And MTP won't have a way to understand a NAPI batch.
+
+    // Looks to me that using the per-packet ACK would better match what we have and,
+    // probably, MTP. I'll be following this approach for now
+
+    struct bpf_tcp_ack *ack = NULL;
+    __u32 prod = ack_prod[cpu];
+    __u32 cons = ack_cons[cpu];
+
+    // check if ack queue is full
+    if (unlikely(cons == ((prod + 1) & (NAPI_BATCH_SIZE - 1)))) {
+        xdp_log_err("ack queue is full");
+    } else {
+        ack = bpf_map_lookup_elem(&bpf_tcp_ack_map, &prod);
+        if (unlikely(!ack))
+            xdp_log_err("ack is NULL");
+    }
+
+    ack->local_ip = c->local_ip;
+    ack->remote_ip = c->remote_ip;
+    ack->local_port = c->local_port;
+    ack->remote_port = c->remote_port;
+    ack->seq = c->tx_next_seq;
+    ack->ack = c->rx_next_seq;
+    ack->rxwnd = c->rx_avail;
+    ack->is_ack = 1;
+    // Question: similar to other questions, should we add these timestamps?
+    // It seems that they are used to calculate the RTT. In our implementation, we consider it a constant
+    __u32 now = bpf_ktime_get_ns();
+    ack->ts_val = now;
+    ack->ts_ecr = c->tx_next_ts;
+    c->tx_next_ts = 0;
+
+    ack_prod[cpu] = (ack_prod[cpu] + 1) & (NAPI_BATCH_SIZE - 1);
+}*/
 
 #if 0
 static __always_inline int app_ev_dispatcher(struct app_timer_event *ev, struct bpf_tcp_conn *c, struct meta_info *data_meta) {
@@ -634,56 +688,6 @@ static __always_inline void slows_congc_ep(struct net_event *ev, struct bpf_tcp_
         // i.e. no need to keep a window and converting it
         // I don't think we can do that though
     }
-}
-
-static __always_inline void send_ack(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta, __u32 cpu) {
-    if(!int_out->trigger_ack) {
-        return;
-    }
-    
-    // Question: eTran has two ways to generate ACKs. One ACK per arriving packet and
-    // ACK coalescing. It seems that they use ACK coalescing by default.
-    // On one hand, using ACK coalescing might be useful to compare with an "optimized" eTran,
-    // and might also be useful to see how that can be implemented in MTP.
-    // However, the way they trigger the ACK enqueue is a bit different from our approach.
-    // An ACK is enqueued if: the current packet's flow is different from the last, which
-    // results in enqueueing values from the previous packet's context; or if XDP_GEN runs,
-    // meaning a NAPI batch is finished.
-    // But how can we represent these ideas in MTP? Storing flow IDs between packets may be
-    // a bit contrived, and I think that the context wouldn't serve for that, since it's per-flow.
-    // And MTP won't have a way to understand a NAPI batch.
-
-    // Looks to me that using the per-packet ACK would better match what we have and,
-    // probably, MTP. I'll be following this approach for now
-
-    struct bpf_tcp_ack *ack = NULL;
-    __u32 prod = ack_prod[cpu];
-    __u32 cons = ack_cons[cpu];
-
-    // check if ack queue is full
-    if (unlikely(cons == ((prod + 1) & (NAPI_BATCH_SIZE - 1)))) {
-        xdp_log_err("ack queue is full");
-    } else {
-        ack = bpf_map_lookup_elem(&bpf_tcp_ack_map, &prod);
-        if (unlikely(!ack))
-            xdp_log_err("ack is NULL");
-    }
-
-    ack->local_ip = c->local_ip;
-    ack->remote_ip = c->remote_ip;
-    ack->local_port = c->local_port;
-    ack->remote_port = c->remote_port;
-    ack->seq = c->tx_next_seq;
-    ack->ack = c->rx_next_seq;
-    ack->rxwnd = c->rx_avail;
-    ack->is_ack = 1;
-    // Question: similar to other questions, should we add these timestamps?
-    // It seems that they are used to calculate the RTT. In our implementation, we consider it a constant
-    /*ack->ts_val = now;
-    ack->ts_ecr = c->tx_next_ts;
-    c->tx_next_ts = 0;*/
-
-    ack_prod[cpu] = (ack_prod[cpu] + 1) & (NAPI_BATCH_SIZE - 1);
 }
 
 // Question: do we need to have a scheduler in eTran?
