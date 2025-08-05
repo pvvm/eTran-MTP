@@ -157,10 +157,6 @@ struct bpf_tcp_conn {
     /** Offset in buffer to place next segment */
     __u32 rx_next_pos;
 
-    /* Start of interval of out-of-order received data */
-    __u32 rx_ooo_start;
-    /* Length of interval of out-of-order received data */
-    __u32 rx_ooo_len;
     /* Number of bytes submitted by AF_XDP but not processed by eBPF yet */
     __u32 tx_pending;    
     /** Number of bytes up to next pos in the buffer that were sent but not
@@ -174,11 +170,17 @@ struct bpf_tcp_conn {
     __u32 cc_idx;
     __u8 ecn_enable;
 
+    // Entries used for sliding window
+    /** Next sequence number expected */
+    __u32 rx_next_seq;          // MTP -> returned by first_unset()
+    /* Start of interval of out-of-order received data */
+    __u32 rx_ooo_start;
+    /* Length of interval of out-of-order received data */
+    __u32 rx_ooo_len;
+
     // eTran entries used in MTP
     /** Duplicate ack count */
     __u16 rx_dupack_cnt;        // MTP -> duplicate_acks
-    /** Next sequence number expected */
-    __u32 rx_next_seq;          // MTP -> recv_next
     /** Sequence number of next segment to be sent */
     __u32 tx_next_seq;          // MTP -> send_next
     /** Bytes available for received segments at next position */
@@ -193,6 +195,7 @@ struct bpf_tcp_conn {
     __u32 rate;
     __u32 send_una;
     __u32 data_end;
+    __u32 recv_next;
 
     // used by XDP_REDIRECT
     // this value is updated when application calls open() or accept()

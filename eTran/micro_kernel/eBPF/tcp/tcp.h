@@ -526,60 +526,6 @@ static __always_inline int tcp_valid_rxack(struct bpf_tcp_conn *c, __u32 ack_seq
 }
 
 /**
- * @brief Given a range [start, end), check if a sequence number is in the range,
- *        considering the wrap-around case. excluding indicates whether the seq is exclusive.
- */
-static __always_inline bool seq_in_range(__u32 seq, __u32 start, __u32 end, bool excluding)
-{
-    if (start <= end) {
-        return excluding ? (seq > start && seq <= end) : (seq >= start && seq < end);
-    } else {
-        return excluding ? (seq > start || seq <= end) : (seq >= start || seq < end);
-    }
-}
-
-/**
- * @brief out-of-order version of tcp_valid_rxseq()
- *        as long as the pkt seq range has overlap with the receive buffer range,
- *        we consider it as a valid pkt
- */
-static __always_inline int tcp_valid_rxseq_ooo(struct bpf_tcp_conn *c, __u32 seq, __u32 payload_len, __u32 *trim_start, __u32 *trim_end)
-{
-    __u32 exp_seq_first = c->rx_next_seq;
-    __u32 exp_seq_last = c->rx_next_seq + c->rx_avail;
-
-    __u32 pkt_seq_first = seq;
-    __u32 pkt_seq_last = seq + payload_len;
-
-    xdp_log("exp_seq_first(%u), exp_seq_last(%u), pkt_seq_first(%u), pkt_seq_last(%u)", exp_seq_first, exp_seq_last, pkt_seq_first, pkt_seq_last);
-
-    bool valid = seq_in_range(pkt_seq_first, exp_seq_first, exp_seq_last, false) ||
-                 seq_in_range(pkt_seq_last, exp_seq_first, exp_seq_last, true) ||
-                 seq_in_range(exp_seq_first, pkt_seq_first, pkt_seq_last, false) ||
-                 seq_in_range(exp_seq_last, pkt_seq_first, pkt_seq_last, true);
-    
-    if (!valid) {
-        return -1;
-    }
-
-    if (seq_in_range(pkt_seq_first, exp_seq_first, exp_seq_last, false)) {
-        *trim_start = 0;
-    } else {
-        *trim_start = exp_seq_first - pkt_seq_first;
-    }
-
-    if (seq_in_range(pkt_seq_last, exp_seq_first, exp_seq_last, true)) {
-        *trim_end = 0;
-    } else {
-        *trim_end = pkt_seq_last - exp_seq_last;
-    }
-
-    xdp_log("*trim_start(%u), *trim_end(%u)", *trim_start, *trim_end);
-
-    return 0;
-}
-
-/**
  * @brief Check if the received SEQ is valid
  */
 static __always_inline int tcp_valid_rxseq(struct bpf_tcp_conn *c, __u32 seq, __u32 payload_len, __u32 *trim_start, __u32 *trim_end)
@@ -705,22 +651,21 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
         // TODO: remove this later
         tx_bump = int_out.num_acked_bytes;
         go_back_pos = int_out.go_back_bytes;
-        bpf_printk("%u %u", tx_bump, go_back_pos);
+        //bpf_printk("%u %u", tx_bump, go_back_pos);
         if(go_back_pos > 0)
             goto unlock;
         ack_net_ep(ev, c, &int_out, data_meta, cpu, cc);
 
         TCP_UNLOCK(c);
         return int_out.drop ? XDP_DROP : XDP_REDIRECT;
+    } else if (ev->minor_type == NET_EVENT_DATA) {
+        data_net_ep(ev, c, &int_out, data_meta, cpu, cc);
+        /* update RTT estimate */
+        if (payload_len && !c->tx_next_ts)
+            c->tx_next_ts = ts_val;
+        //TCP_UNLOCK(c);
+        goto out;
     }
-    /*if(ev->minor_type == NET_EVENT_ACK) {
-        cc->cnt_rx_acks++;
-        go_back_pos = fast_retr_rec_ep(ev, c, &int_out, data_meta, cpu, cc, &tx_bump);
-        if(go_back_pos > 0)
-            goto unlock;
-
-        ack_net_ep(ev, c, &int_out, data_meta, cpu, cc);
-    }*/
     #else
     /* ACK processing */
     if (tcph->ack == 1) {
@@ -765,7 +710,8 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
     #endif
 
     /* Payload validation */
-    #ifdef OOO_RECV
+    #ifndef MTP_ON
+    //#ifdef OOO_RECV
     __u32 trim_start, trim_end;
     if (unlikely(tcp_valid_rxseq_ooo(c, seq, payload_len, &trim_start, &trim_end))) {
         trigger_ack = false;
@@ -811,7 +757,7 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
         goto unlock;
     }
 
-    #else
+    //#else
         __u32 trim_start, trim_end;
         if (unlikely(tcp_valid_rxseq(c, seq, payload_len, &trim_start, &trim_end))) {
             trigger_ack = false;
@@ -828,7 +774,9 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
         xdp_log("Good seq, payload_off(%u), payload_len(%u), trim_start(%u), trim_end(%u)", 
             payload_off, payload_len, trim_start, trim_end);
 
+    //#endif
     #endif
+
 
     #ifndef MTP_ON
     if (likely(tx_bump || (c->rx_remote_avail < ((bpf_ntohs(tcph->window)) << TCP_WND_SCALE)))) {
@@ -858,6 +806,7 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
     #endif
 
     /* update TCP state if we have payload */
+    #ifndef MTP_ON
     if (likely(payload_len)) {
         rx_bump = payload_len;
         c->rx_avail -= payload_len;
@@ -906,6 +855,7 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
         }
         // bpf_printk("c->rx_avail = %u", c->rx_avail);
     }
+    #endif
 
 unlock:
 
@@ -939,7 +889,8 @@ unlock:
 
 out:
 
-    if (trigger_ack) {
+    //if (trigger_ack) {
+    if(int_out.trigger_ack) {
         // TODO
         xdp_log("trigger_ack");
         #ifdef ACK_COALESCING
@@ -960,7 +911,8 @@ out:
     }
     TCP_UNLOCK(c);
 
-    return drop ? XDP_DROP : XDP_REDIRECT;
+    //return drop ? XDP_DROP : XDP_REDIRECT;
+    return int_out.drop ? XDP_DROP : XDP_REDIRECT;
 }
 
 static __always_inline bool is_tcp_syn(struct tcphdr *tcp) {
