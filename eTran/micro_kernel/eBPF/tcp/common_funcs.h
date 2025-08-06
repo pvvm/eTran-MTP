@@ -6,7 +6,7 @@
 
 // ACK
 // emulate a per-cpu SCSP queue with BPF_MAP_TYPE_PERCPU_ARRAY
-/*struct bpf_tcp_ack {
+struct bpf_tcp_ack {
     __u32 local_ip;
     __u32 remote_ip;
     __u16 local_port;
@@ -35,7 +35,7 @@ struct {
 SEC(".bss.ack_prod")
 __u32 ack_prod[MAX_CPU];
 SEC(".bss.ack_cons")
-__u32 ack_cons[MAX_CPU];*/
+__u32 ack_cons[MAX_CPU];
 
 static __always_inline void set_tcp_flag(struct tcphdr *tcph, __u16 len, __u16 flags)
 {

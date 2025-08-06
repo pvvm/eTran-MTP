@@ -69,39 +69,6 @@ struct {
     __uint(map_flags, BPF_F_MMAPABLE);
 } bpf_cc_map SEC(".maps");
 
-// ACK
-// emulate a per-cpu SCSP queue with BPF_MAP_TYPE_PERCPU_ARRAY
-struct bpf_tcp_ack {
-    __u32 local_ip;
-    __u32 remote_ip;
-    __u16 local_port;
-    __u16 remote_port;
-
-    __u32 seq; // tx_next_seq
-    __u32 ack; // rx_next_seq
-    __u32 rxwnd; // rx_avail
-
-    __u32 ts_val; // now
-    __u32 ts_ecr; // tx_next_ts
-
-    __u8 ecn_flags;
-
-    // MTP-only entries
-    __u8 is_ack;    // Question: it isn't necessary, but just to make it match with MTP
-};
-
-struct {
-  __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-  __uint(max_entries, NAPI_BATCH_SIZE);
-  __type(key, __u32);
-  __type(value, struct bpf_tcp_ack);
-} bpf_tcp_ack_map SEC(".maps");
-
-SEC(".bss.ack_prod")
-__u32 ack_prod[MAX_CPU];
-SEC(".bss.ack_cons")
-__u32 ack_cons[MAX_CPU];
-
 SEC(".bss.tx_cached_ts")
 __u64 tx_cached_ts[MAX_CPU];
 
@@ -589,15 +556,17 @@ static __always_inline int tcp_valid_rxseq(struct bpf_tcp_conn *c, __u32 seq, __
 static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_conn *c, __u32 pkt_len, struct meta_info *data_meta, bool ece, __u32 cpu,
     struct net_event *ev)
 {
-    bool trigger_ack = false;
-    __u32 go_back_pos = 0;
+    bool drop = true;
     __u32 payload_off = sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct tcphdr) + TS_OPT_SIZE;
     __u32 payload_len = pkt_len - payload_off;
-    __u32 seq = bpf_ntohl(tcph->seq);
-    __u32 ack_seq = bpf_ntohl(tcph->ack_seq);
     struct tcp_timestamp_opt *ts_opt = (struct tcp_timestamp_opt *)(tcph + 1);
     __u32 ts_val = bpf_ntohl(ts_opt->ts_val);
+    #ifndef MTP_ON
     __u32 ts_ecr = bpf_ntohl(ts_opt->ts_ecr);
+    bool trigger_ack = false;
+    __u32 go_back_pos = 0;
+    __u32 seq = bpf_ntohl(tcph->seq);
+    __u32 ack_seq = bpf_ntohl(tcph->ack_seq);
 
     __u32 rx_bump = 0;
     __u32 tx_bump = 0;
@@ -605,7 +574,6 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
     bool clear_ooo = false;
 
     __u32 now = 0;
-    bool drop = true;
     #ifndef ACK_COALESCING
     struct bpf_tcp_ack *ack = NULL;
     #endif
@@ -633,6 +601,7 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
         }
         #endif
     }
+    #endif
 
     struct bpf_cc *cc = bpf_map_lookup_elem(&bpf_cc_map, &c->cc_idx);
     if (unlikely(!cc)) {
@@ -664,11 +633,11 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
         if (payload_len && !c->tx_next_ts)
             c->tx_next_ts = ts_val;
         
-        // send_ack(ev, c, &int_out, data_meta, cpu, cc);
+        send_ack(ev, c, &int_out, data_meta, cpu, cc);
         
-        //TCP_UNLOCK(c);
-        //return int_out.drop ? XDP_DROP : XDP_REDIRECT;
-        goto out;
+        TCP_UNLOCK(c);
+        return int_out.drop ? XDP_DROP : XDP_REDIRECT;
+        //goto out;
     }
     #else
     /* ACK processing */
@@ -715,7 +684,7 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
 
     /* Payload validation */
     #ifndef MTP_ON
-    //#ifdef OOO_RECV
+    #ifdef OOO_RECV
     __u32 trim_start, trim_end;
     if (unlikely(tcp_valid_rxseq_ooo(c, seq, payload_len, &trim_start, &trim_end))) {
         trigger_ack = false;
@@ -761,7 +730,7 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
         goto unlock;
     }
 
-    //#else
+    #else
         __u32 trim_start, trim_end;
         if (unlikely(tcp_valid_rxseq(c, seq, payload_len, &trim_start, &trim_end))) {
             trigger_ack = false;
@@ -778,7 +747,7 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
         xdp_log("Good seq, payload_off(%u), payload_len(%u), trim_start(%u), trim_end(%u)", 
             payload_off, payload_len, trim_start, trim_end);
 
-    //#endif
+    #endif
     #endif
 
 
@@ -788,12 +757,10 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
         c->rx_remote_avail = (bpf_ntohs(tcph->window)) << TCP_WND_SCALE;
         // bpf_printk("(%u),ack_seq(%u), c->rx_remote_avail(%u), c->tx_sent(%u)", tx_bump, ack_seq, c->rx_remote_avail, c->tx_sent);
     }
-    #endif
     
     /* update RTT estimate */
     if (payload_len && !c->tx_next_ts)
         c->tx_next_ts = ts_val;
-    #ifndef MTP_ON
     if (likely(tcph->ack == 1 && ts_ecr && tx_bump)) {
         // RTT = t{completion} - t{sent} - t{serialization}
         __u32 rtt = (now - ts_ecr);
@@ -859,7 +826,6 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
         }
         // bpf_printk("c->rx_avail = %u", c->rx_avail);
     }
-    #endif
 
 unlock:
 
@@ -893,8 +859,8 @@ unlock:
 
 out:
 
-    //if (trigger_ack) {
-    if(int_out.trigger_ack) {
+    if (trigger_ack) {
+    //if(int_out.trigger_ack) {
         // TODO
         xdp_log("trigger_ack");
         #ifdef ACK_COALESCING
@@ -914,9 +880,8 @@ out:
         #endif
     }
     TCP_UNLOCK(c);
-
-    //return drop ? XDP_DROP : XDP_REDIRECT;
-    return int_out.drop ? XDP_DROP : XDP_REDIRECT;
+    #endif
+    return drop ? XDP_DROP : XDP_REDIRECT;
 }
 
 static __always_inline bool is_tcp_syn(struct tcphdr *tcp) {

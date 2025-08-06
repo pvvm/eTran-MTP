@@ -450,7 +450,7 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
     }
 }
 
-/*static __always_inline void mtp_pkt_gen_for_xdp_gen(struct TCPBP bp, struct bpf_tcp_conn *c,  __u32 cpu) {
+static __always_inline void mtp_pkt_gen_for_xdp_gen(struct TCPBP bp, struct bpf_tcp_conn *c,  __u32 cpu) {
     struct bpf_tcp_ack *ack = NULL;
     __u32 prod = ack_prod[cpu];
     __u32 cons = ack_cons[cpu];
@@ -460,8 +460,10 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
         xdp_log_err("ack queue is full");
     } else {
         ack = bpf_map_lookup_elem(&bpf_tcp_ack_map, &prod);
-        if (unlikely(!ack))
+        if (unlikely(!ack)) {
             xdp_log_err("ack is NULL");
+            return;
+        }
     }
 
     ack->local_ip = c->local_ip;
@@ -515,7 +517,7 @@ static __always_inline void send_ack(struct net_event *ev, struct bpf_tcp_conn *
     // Question: this function will be equivalent to pkt_gen_instruction when the pkt_bp
     // doesn't have data (goes to XDP_GEN)
     mtp_pkt_gen_for_xdp_gen(bp, c, cpu);
-}*/
+}
 
 #if 0
 static __always_inline int app_ev_dispatcher(struct app_timer_event *ev, struct bpf_tcp_conn *c, struct meta_info *data_meta) {
