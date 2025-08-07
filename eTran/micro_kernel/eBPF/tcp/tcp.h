@@ -557,11 +557,11 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
     struct net_event *ev)
 {
     bool drop = true;
-    __u32 payload_off = sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct tcphdr) + TS_OPT_SIZE;
-    __u32 payload_len = pkt_len - payload_off;
     struct tcp_timestamp_opt *ts_opt = (struct tcp_timestamp_opt *)(tcph + 1);
     __u32 ts_val = bpf_ntohl(ts_opt->ts_val);
     #ifndef MTP_ON
+    __u32 payload_off = sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct tcphdr) + TS_OPT_SIZE;
+    __u32 payload_len = pkt_len - payload_off;
     __u32 ts_ecr = bpf_ntohl(ts_opt->ts_ecr);
     bool trigger_ack = false;
     __u32 go_back_pos = 0;
@@ -593,11 +593,11 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
 
         // check if ack queue is full
         if (unlikely(cons == ((prod + 1) & (NAPI_BATCH_SIZE - 1)))) {
-            xdp_log_err("ack queue is full");
+            bpf_printk("ack queue is full");
         } else {
             ack = bpf_map_lookup_elem(&bpf_tcp_ack_map, &prod);
             if (unlikely(!ack))
-                xdp_log_err("ack is NULL");
+                bpf_printk("ack is NULL");
         }
         #endif
     }
@@ -630,7 +630,7 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
     } else if (ev->minor_type == NET_EVENT_DATA) {
         data_net_ep(ev, c, &int_out, data_meta, cpu, cc);
         /* update RTT estimate */
-        if (payload_len && !c->tx_next_ts)
+        if (ev->data_len && !c->tx_next_ts)
             c->tx_next_ts = ts_val;
         
         send_ack(ev, c, &int_out, data_meta, cpu, cc);
@@ -880,6 +880,9 @@ out:
         #endif
     }
     TCP_UNLOCK(c);
+
+    return drop ? XDP_DROP : XDP_REDIRECT;
+    //return int_out.drop ? XDP_DROP : XDP_REDIRECT;
     #endif
     return drop ? XDP_DROP : XDP_REDIRECT;
 }
