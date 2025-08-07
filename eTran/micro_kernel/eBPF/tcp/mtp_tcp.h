@@ -37,6 +37,13 @@ static __always_inline void mtp_fill_tcp_hdr(struct tcphdr *tcph, struct bpf_tcp
 
 static __always_inline struct TCPBP send_ep
 (struct app_timer_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta) {
+    // Question: the problem of having this instruction here is that all packets arriving to XDP_EGRESS
+    // will execute it. At first, this is okay if we consider that will only be doing this for
+    // packets representing app events. However, this is problematic for retransmissions, since they will
+    // also be coming here.
+    // So, we can either have a way to differentiate retransmitted packets (which won't be that trivial and
+    // will require changes to userspace and have a way to send this notification), decrease data_end when
+    // retransmits happen, or adapt the code to not use this variable.
     c->data_end += ev->data_size;
 
     struct TCPBP bp;

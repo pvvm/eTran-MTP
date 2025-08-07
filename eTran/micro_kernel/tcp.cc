@@ -10,6 +10,7 @@
 
 #include "trans_ebpf.h"
 #include "nic.h"
+#include "ctrl_plane_mtp.h"
 
 // mirco_kernel.cc
 extern class eTranNIC *etran_nic;
@@ -1002,10 +1003,26 @@ void poll_tcp_cc_to(void)
     next_tcp_cc_to_tsc = UINT64_MAX;
     
     tcp_connections_lock.lock();
+    // Question IMPORTANT: here, the control thread go over all the active connections.
+    // Is it okay to have this "shared" timer between connections in MTP?
+    // I guess that the main problem would be starting and cancelling a timer.
+    // But we could have that boolean per-connection that specifies if the timer
+    // is active or not. In case it's inactive, the connection is skipped
+
+    // A: actually, in addition to having that timer to sleep in the control loop,
+    // we have other two "layers" of timers. The one in line 1061 that will basically
+    // decide whether we'll run the chain of CC EPs (SS/CA and rate), and the other
+    // for retransmission used in function handle_retransmission.
+    // The good thing is that both are connection-specific (they use values unique)
+    // to their contexts.
+    // I wonder if we the "shared" timer could be something target-specific and abstracted
+    // for MTP.
     for (auto it = tcp_connections.begin(); it != tcp_connections.end();)
     {
         c = it->second;
         
+        // Question: this function also checks for these two cases (not sure what
+        // the first is for). Can we assume that these can be by default?
         /* skip tcp_connection created for listener */
         if (unlikely(c->type == TCP_CONN_TYPE_FAKE)) {
             it++;
@@ -1036,6 +1053,8 @@ void poll_tcp_cc_to(void)
             continue;
         }
 
+        // Question: the problem here is that this value will be the minimum among all
+        // connections. Can we represent something like this in MTP?
         next_tcp_cc_to_tsc = std::min(next_tcp_cc_to_tsc, c->cc_last_tsc + us_to_cycles(c->cc_last_rtt * CC_INTERVAL_RTT));
 
         __u32 t_us = cycles_to_us((curr_tsc - c->cc_last_tsc));
@@ -1046,8 +1065,21 @@ void poll_tcp_cc_to(void)
             continue;
         }
         
+        // Question: can we assume that the compiler knows the variables used in BOTH
+        // timer and non-timer EPs and get a snapshot by default?
         /* snapshot cc */
+        #ifdef MTP_ON
+        struct timer_event ev;
+        struct interm_out int_out;
+        // This function will be by default (simply get the latest snapshot of shared context values)
+        // Also, we can consider that timer events instantiated in 
+        mtp_snapshot_cc(ev, c, etran_tcp);
+
+        slows_congc_ep(ev, c, &int_out);
+        #else
         snapshot_cc(&stats, c->cc_idx);
+        #endif
+        //printf("%u, %u\n", c->cnt_rx_acks, stats.c_acks);
 
         /* calculate difference to last time */
         last = c->cc_last_drops;
@@ -1066,6 +1098,17 @@ void poll_tcp_cc_to(void)
         c->cc_last_ecnb = stats.c_ecnb;
         stats.c_ecnb -= last;
 
+        // Question: in the CC (not dctcp window) and retransmission functions, they
+        // have an argument called curr_tsc, which is the current number of cycles.
+        // It would be interesting to have one per connection, but they simply
+        // get one before entering the loop and using the same for all connections.
+        // I wonder if it's an error, since they save it to c->cc_last_tsc
+        // and subtract by c->cc_last_tsc in next iterations.
+        // In any case, if we consider that we have events will carry a timestamp
+        // by default, should we:
+        //      - specify the timestamp in XDP and pass through event in the shared map
+        //      - or can we simply put in the event instantiated here (using get_cycles + cycles_to_us)
+        // I think that the second one better matches what eTran has
         /* run congestion control algorithm */
         if (c->algorithm == CC_TIMELY)
         {

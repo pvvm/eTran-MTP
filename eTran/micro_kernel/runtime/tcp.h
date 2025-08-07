@@ -305,6 +305,25 @@ struct tcp_connection
     /* Congestion control */
     /* CC map index */
     uint32_t cc_idx;
+
+    /*---- MTP values shared with XDP (bpf_cc map) ----*/
+    __u64 prev_desired_tx_ts;
+    /** Bps */
+    __u32 rate;
+    /* Number of dropped segments (current iteration) */
+    __u16 cnt_tx_drops;
+    /* Number of ACKs received (current iteration) */
+    __u16 cnt_rx_acks;
+    /* Acknowledged bytes (current iteration) */
+    __u32 cnt_rx_ack_bytes;
+    /* Number of ACKd bytes with ECN marks (current iteration) */
+    __u32 cnt_rx_ecn_bytes;
+    /* Current rtt estimate (current iteration) */
+    __u32 rtt_est;
+    /* Has pending data in transmit buffer (current iteration) */
+    __u32 txp;
+
+    /*------- Values in the last iteration -------*/
     /** Timestamp when control loop ran last (cycles) */
     uint64_t cc_last_tsc;
     /** Last rtt estimate */
@@ -317,6 +336,7 @@ struct tcp_connection
     uint32_t cc_last_ackb;
     /** Number of ACKd bytes with ECN marks */
     uint32_t cc_last_ecnb;
+
     /** Congestion rate limit (kbps). */
     uint32_t cc_rate;
     /** Had retransmits. */

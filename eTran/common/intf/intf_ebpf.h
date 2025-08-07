@@ -102,6 +102,9 @@ struct slow_path_info {
 
 #define TCP_MAX_RTT 100000
 
+struct timer_event {
+};
+
 struct bpf_cc {
     __u64 prev_desired_tx_ts;
     /** Bps */
@@ -118,13 +121,20 @@ struct bpf_cc {
     __u32 rtt_est;
     /** has pending tx data? */
     __u32 txp;
-    //__u32 cwnd_size;
-} __attribute__((packed, aligned(32)));
+    /** Timer event instance */
+    struct timer_event ev;
+} __attribute__((packed, aligned(64)));
+#ifdef __cplusplus
+static_assert(sizeof(struct bpf_cc) == 64, "bpf_cc size is not 64 bytes");
+#else
+_Static_assert (sizeof(struct bpf_cc) == 64, "bpf_cc size is not 64 bytes");
+#endif
+/*} __attribute__((packed, aligned(32)));
 #ifdef __cplusplus
 static_assert(sizeof(struct bpf_cc) == 32, "bpf_cc size is not 32 bytes");
 #else
 _Static_assert (sizeof(struct bpf_cc) == 32, "bpf_cc size is not 32 bytes");
-#endif
+#endif*/
 
 struct bpf_cc_map_user {
     struct bpf_cc entry[MAX_TCP_FLOWS];
