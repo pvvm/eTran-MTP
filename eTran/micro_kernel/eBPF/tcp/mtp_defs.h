@@ -25,7 +25,7 @@ struct interm_out {
     __u8 trigger_ack;
     __u8 drop;
     __u32 num_acked_bytes;
-    __u32 go_back_bytes;
+    __u32 go_back_pos;
 };
 
 // Represents APP and TIMER events in XDP

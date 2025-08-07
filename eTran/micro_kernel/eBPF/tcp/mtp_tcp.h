@@ -52,6 +52,17 @@ static __always_inline struct TCPBP send_ep
 
     c->tx_next_seq += ev->data_size;
 
+    // Question: in MTP we calculate the period of time for the timeout in an EP (RTO) and use it across th
+    // code. This seems fine in our back end because everything is done in XDP with bpf_timer.
+    // Meanwhile, here, the period of time for the timeout is calculated in the control path, and this calculation
+    // isn't triggered by anything like an event, it's just in a busy loop.
+    // Can we say that the EPs in XDP can only set the timer as active or not, while the control path and a timer
+    // EP implemented in it will calculate this timeout?
+    // For example, if we still used RTO (which they don't use), the send_ep would only set a boolean specifying
+    // that this timer is active. Meanwhile, in the control path, after doing all the timer triggered operations,
+    // will calculate the next RTO and reset the timer.
+    // Can we consider that timer EPs are the only ones able to restart timers? (To simulate the busy loop)
+
     // TODO: add functions to initialize timers
 
     return bp;
@@ -158,7 +169,6 @@ static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tc
     // Should we do the same?
     else if(c->tx_next_seq - c->send_una && ev->data_len == 0 && (c->rx_remote_avail == (ev->rwnd_size << TCP_WND_SCALE)) && ++c->rx_dupack_cnt == 3) {
         int_out->change_cwnd = 0;
-        bpf_printk("AQUI %d", c->rx_dupack_cnt);
         //c->rx_dupack_cnt += 1;
         //if(c->rx_dupack_cnt == 3) {
             // TODO: comment this one later after ack_net_ep is done (we only zero rx_dupack_cnt there in MTP)
@@ -199,28 +209,25 @@ static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tc
         c->last_ack = ev->ack_seq;
     }*/
 
-    int_out->go_back_bytes = c->tx_next_pos;
+    int_out->go_back_pos = c->tx_next_pos;
     //c->send_una = ev->ack_seq;
 }
 
 static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
     __u32 cpu, struct bpf_cc *cc) {
-    //bpf_printk("%d %d %d", ev->ack_seq, c->send_una, c->tx_next_seq);
 
     if(c->rx_dupack_cnt == 3) {
         int_out->drop = 0;
-        //bpf_printk("AQUI ACONTECEU 3 ACK");
         c->rx_dupack_cnt = 0;
         // Question: this part is quite weird.
         // To notify the userspace to retransmit the packets (with go-back-N), eTran simply
-        // marks the ACK packet with this flag and specify the number of bytes to go back
-        // (c->tx_next_seq - c->send_una).
+        // marks the ACK packet with this flag and specify the position to go back (essentially send_una).
         // But how would the compiler be able to convert that whole pkt_bp creation,
         // pkt_gen_instr, and so on, into this?
         // The main problem is that none of the arguments of unseg_data match with a
-        // go_back_bytes value, which is the only relevant value to send back to userspace.
+        // go_back_pos value, which is the only relevant value to send back to userspace.
         data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
-        data_meta->rx.go_back_pos = int_out->go_back_bytes;
+        data_meta->rx.go_back_pos = int_out->go_back_pos;
         data_meta->rx.go_back_pos |= RECOVERY_MASK;
         data_meta->rx.rx_pos = POISON_32;
         data_meta->rx.poff = POISON_16;
@@ -232,25 +239,23 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
     // Think about how we'll deal with the if(ctx.lwu_seq < ev.seq_num...) here, and so on
     // __u32 rwindow = ev->rwnd_size << TCP_WND_SCALE;
     if(!int_out->drop) {
-        //bpf_printk("AQUI CACETA VOADORA %d %d %d", ev->ack_seq, c->send_una, c->tx_next_seq);
-        //return;
-    if(int_out->num_acked_bytes || c->rx_remote_avail < (ev->rwnd_size << TCP_WND_SCALE))
-        c->rx_remote_avail = ev->rwnd_size << TCP_WND_SCALE;
-    
-    // Question: same from MTP file. Do we have a function to get current timestamps in MTP?
-    if(ev->ts_ecr && int_out->num_acked_bytes) {
-        __u32 now = bpf_ktime_get_ns();
-        __u32 rtt = (now - ev->ts_ecr);
-        rtt /= 1000; // microseconds
-        rtt -= (int_out->num_acked_bytes * 1000000) / LINK_BANDWIDTH;
-        // bpf_printk("CPU#%u, RTT: %u us", bpf_get_smp_processor_id(), rtt);
-        if (rtt < TCP_MAX_RTT) {
-            if (cc->rtt_est)
-                cc->rtt_est = (cc->rtt_est * 7 + rtt) / 8;
-            else
-                cc->rtt_est = rtt;
+        if(int_out->num_acked_bytes || c->rx_remote_avail < (ev->rwnd_size << TCP_WND_SCALE))
+            c->rx_remote_avail = ev->rwnd_size << TCP_WND_SCALE;
+        
+        // Question: same from MTP file. Do we have a function to get current timestamps in MTP?
+        if(ev->ts_ecr && int_out->num_acked_bytes) {
+            __u32 now = bpf_ktime_get_ns();
+            __u32 rtt = (now - ev->ts_ecr);
+            rtt /= 1000; // microseconds
+            rtt -= (int_out->num_acked_bytes * 1000000) / LINK_BANDWIDTH;
+            // bpf_printk("CPU#%u, RTT: %u us", bpf_get_smp_processor_id(), rtt);
+            if (rtt < TCP_MAX_RTT) {
+                if (cc->rtt_est)
+                    cc->rtt_est = (cc->rtt_est * 7 + rtt) / 8;
+                else
+                    cc->rtt_est = rtt;
+            }
         }
-    }
     }
 
     // Question: eTran doesn't have a data_end value in the context.
@@ -282,7 +287,6 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
     }
     if(rmlen > 0 || xsk_budget_avail(c)) {
         int_out->drop = 0;
-        //bpf_printk("AQUI CARALHO %d %d %d %d %d", rmlen, c->send_una, ev->data_len, c->rx_dupack_cnt, c->rx_remote_avail);
         data_meta->rx.ack_bytes = rmlen;
         data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
         data_meta->rx.rx_pos = POISON_32;
@@ -318,7 +322,6 @@ static __always_inline __u32 trim_and_handle_ooo(__u32 seq, __u32 *payload_len, 
 
     /* check if we can add it to the out of order interval */
     if (unlikely(seq != c->rx_next_seq)) {
-        bpf_printk("OOO");
         if (!*payload_len) return rx_bump;
         xdp_log("OOO packet, seq(%u), c->rx_next_seq(%u)", seq, c->rx_next_seq);
         if (c->rx_ooo_len == 0) {

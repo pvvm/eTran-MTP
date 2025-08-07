@@ -557,11 +557,11 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
     struct net_event *ev)
 {
     bool drop = true;
-    __u32 payload_off = sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct tcphdr) + TS_OPT_SIZE;
-    __u32 payload_len = pkt_len - payload_off;
     struct tcp_timestamp_opt *ts_opt = (struct tcp_timestamp_opt *)(tcph + 1);
     __u32 ts_val = bpf_ntohl(ts_opt->ts_val);
-    //#ifndef MTP_ON
+    #ifndef MTP_ON
+    __u32 payload_off = sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct tcphdr) + TS_OPT_SIZE;
+    __u32 payload_len = pkt_len - payload_off;
     __u32 ts_ecr = bpf_ntohl(ts_opt->ts_ecr);
     bool trigger_ack = false;
     __u32 go_back_pos = 0;
@@ -601,7 +601,7 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
         }
         #endif
     }
-    //#endif
+    #endif
 
     struct bpf_cc *cc = bpf_map_lookup_elem(&bpf_cc_map, &c->cc_idx);
     if (unlikely(!cc)) {
@@ -884,6 +884,7 @@ out:
     return drop ? XDP_DROP : XDP_REDIRECT;
     //return int_out.drop ? XDP_DROP : XDP_REDIRECT;
     #endif
+    return drop ? XDP_DROP : XDP_REDIRECT;
 }
 
 static __always_inline bool is_tcp_syn(struct tcphdr *tcp) {

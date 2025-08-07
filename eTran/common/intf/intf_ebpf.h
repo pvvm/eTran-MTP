@@ -34,7 +34,7 @@
 /* allow some conditions to bypass the rate limiter */
 #define BYPASS_RL
 
-//#define ACK_COALESCING
+#define ACK_COALESCING
 
 #define OOO_RECV
 
