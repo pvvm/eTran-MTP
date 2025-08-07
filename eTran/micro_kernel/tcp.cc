@@ -1076,6 +1076,7 @@ void poll_tcp_cc_to(void)
         mtp_snapshot_cc(ev, c, etran_tcp);
 
         slows_congc_ep(ev, c, &int_out);
+        set_tx_rate(ev, c, &int_out);
         #else
         snapshot_cc(&stats, c->cc_idx);
         #endif
