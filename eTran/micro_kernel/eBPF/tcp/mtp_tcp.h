@@ -150,22 +150,27 @@ static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tc
     int_out->change_cwnd = 1;
 
     __u32 go_back_bytes = 0;
+    if(int_out->num_acked_bytes) {
+        c->rx_dupack_cnt = 0;
+    }
     // Question: the way they do this check is a bit different.
     // It seems that they get the number of bytes acknowledged in the ack, and enter the condition if it's zero
     // Should we do the same?
-    if(ev->ack_seq == c->last_ack) {
+    else if(c->tx_next_seq - c->send_una && ev->data_len == 0 && (c->rx_remote_avail == (ev->rwnd_size << TCP_WND_SCALE)) && ++c->rx_dupack_cnt == 3) {
         int_out->change_cwnd = 0;
-        c->rx_dupack_cnt += 1;
-        if(c->rx_dupack_cnt == 3) {
+        bpf_printk("AQUI %d", c->rx_dupack_cnt);
+        //c->rx_dupack_cnt += 1;
+        //if(c->rx_dupack_cnt == 3) {
             // TODO: comment this one later after ack_net_ep is done (we only zero rx_dupack_cnt there in MTP)
-            c->rx_dupack_cnt = 0;
+            //c->rx_dupack_cnt = 0;
 
             go_back_bytes = c->tx_next_seq - c->send_una;
             c->tx_next_seq -= go_back_bytes;
             if (c->tx_next_pos >= go_back_bytes) {
                 c->tx_next_pos -= go_back_bytes;
             } else {
-                c->tx_next_pos = c->tx_buf_size - (go_back_bytes - c->tx_next_pos);
+                __u32 x = (go_back_bytes - c->tx_next_pos);
+                c->tx_next_pos = c->tx_buf_size - x;
             }
 
             // Question: this section of code isn't covered in MTP (is used by the other parts of the code)
@@ -189,23 +194,22 @@ static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tc
             // Question: in MTP we would have a set_rate function here.
             // But this rate would only be used in XDP_EGRESS and enqueueing the packets to the timing wheel
             // Can we consider the compiler would simply ignore the function?
-        }
-    } else {
+    } /*else {
         c->rx_dupack_cnt = 0;
         c->last_ack = ev->ack_seq;
-    }
+    }*/
 
-    int_out->go_back_bytes = go_back_bytes;
+    int_out->go_back_bytes = c->tx_next_pos;
     //c->send_una = ev->ack_seq;
 }
 
 static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
     __u32 cpu, struct bpf_cc *cc) {
-    if(int_out->drop)
-        return;
     //bpf_printk("%d %d %d", ev->ack_seq, c->send_una, c->tx_next_seq);
 
     if(c->rx_dupack_cnt == 3) {
+        int_out->drop = 0;
+        //bpf_printk("AQUI ACONTECEU 3 ACK");
         c->rx_dupack_cnt = 0;
         // Question: this part is quite weird.
         // To notify the userspace to retransmit the packets (with go-back-N), eTran simply
@@ -227,6 +231,9 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
     // Question (not really):
     // Think about how we'll deal with the if(ctx.lwu_seq < ev.seq_num...) here, and so on
     // __u32 rwindow = ev->rwnd_size << TCP_WND_SCALE;
+    if(!int_out->drop) {
+        //bpf_printk("AQUI CACETA VOADORA %d %d %d", ev->ack_seq, c->send_una, c->tx_next_seq);
+        //return;
     if(int_out->num_acked_bytes || c->rx_remote_avail < (ev->rwnd_size << TCP_WND_SCALE))
         c->rx_remote_avail = ev->rwnd_size << TCP_WND_SCALE;
     
@@ -243,6 +250,7 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
             else
                 cc->rtt_est = rtt;
         }
+    }
     }
 
     // Question: eTran doesn't have a data_end value in the context.
@@ -270,17 +278,21 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
     // Maybe we can assume that the last argument of tx_data_flush will be used in rx.ack_bytes?
     __u32 rmlen = int_out->num_acked_bytes;
     if(rmlen > 0) {
+        c->send_una = ev->ack_seq;
+    }
+    if(rmlen > 0 || xsk_budget_avail(c)) {
+        int_out->drop = 0;
+        //bpf_printk("AQUI CARALHO %d %d %d %d %d", rmlen, c->send_una, ev->data_len, c->rx_dupack_cnt, c->rx_remote_avail);
         data_meta->rx.ack_bytes = rmlen;
         data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
         data_meta->rx.rx_pos = POISON_32;
         data_meta->rx.poff = POISON_16;
         data_meta->rx.plen = POISON_16;
-        c->send_una = ev->ack_seq;
     }
     // TODO: add timer instruction to restart the timeout timer
 }
 
-static __always_inline int trim_and_handle_ooo(__u32 seq, __u32 *payload_len, struct bpf_tcp_conn *c, struct meta_info *data_meta, struct interm_out *int_out, bool *clear_ooo) {
+static __always_inline __u32 trim_and_handle_ooo(__u32 seq, __u32 *payload_len, struct bpf_tcp_conn *c, struct meta_info *data_meta, struct interm_out *int_out, bool *clear_ooo) {
     __u32 rx_bump = 0;
     __u32 trim_start, trim_end;
     int_out->trigger_ack = true;
@@ -306,6 +318,7 @@ static __always_inline int trim_and_handle_ooo(__u32 seq, __u32 *payload_len, st
 
     /* check if we can add it to the out of order interval */
     if (unlikely(seq != c->rx_next_seq)) {
+        bpf_printk("OOO");
         if (!*payload_len) return rx_bump;
         xdp_log("OOO packet, seq(%u), c->rx_next_seq(%u)", seq, c->rx_next_seq);
         if (c->rx_ooo_len == 0) {
@@ -328,6 +341,7 @@ static __always_inline int trim_and_handle_ooo(__u32 seq, __u32 *payload_len, st
         // mark this packet is an out-of-order segment
         data_meta->rx.ooo_bump = OOO_SEGMENT_MASK;
 
+        return rx_bump;
         //goto unlock;
     }
 
@@ -418,6 +432,12 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
 
     bool clear_ooo = false;
     __u32 rx_bump = trim_and_handle_ooo(ev->seq_num, &ev->data_len, c, data_meta, int_out, &clear_ooo);
+
+    if ((c->rx_remote_avail < ev->rwnd_size << TCP_WND_SCALE)) {
+        /* update TCP receive window */
+        c->rx_remote_avail = ev->rwnd_size << TCP_WND_SCALE;
+        // bpf_printk("(%u),ack_seq(%u), c->rx_remote_avail(%u), c->tx_sent(%u)", tx_bump, ack_seq, c->rx_remote_avail, c->tx_sent);
+    }
 
     // Question: is it okay to assume that c->rx_next_seq will be a value that will be in eTran by default
     // and first_unset method can be translated to simply copying this value?

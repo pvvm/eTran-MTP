@@ -76,18 +76,18 @@ static inline int connection_send(unsigned int tid, struct connection *c)
 {
     int teste = 0;
     ssize_t ret;
-    //uint32_t target_bytes = 0;
+    uint32_t target_bytes;
     int need_epoll_out = 0;
     // Transmit messages as much as possible through this connection until we reach max_outstanding or no buffer space
     while (c->pending_bytes) {
         //printf("Send %d %d\n", teste, target_bytes);
-        //target_bytes = std::min(c->pending_bytes, c->event.data_size);
-        //ret = write(c->fd, c->buf + (c->total_bytes - c->pending_bytes), std::min(target_bytes, (unsigned int)DATA_BLOCK_SIZE));
+        target_bytes = std::min(c->pending_bytes, c->event.data_size);
+        ret = write(c->fd, c->buf + (c->total_bytes - c->pending_bytes), std::min(target_bytes, (unsigned int)DATA_BLOCK_SIZE));
 
         // Question: I tried making it more general by passing the app_event instead of the data_size,
         // but the compiler announced an error that write from unistd.h had to receive size_t.
         // Would this be okay here?
-        ret = write(c->fd, c->buf + (c->total_bytes - c->pending_bytes), c->event.data_size);
+        //ret = write(c->fd, c->buf + (c->total_bytes - c->pending_bytes), c->event.data_size);
         if (ret > 0) {
             c->pending_bytes -= ret;
             total_req_bytes[tid].fetch_add(ret);
