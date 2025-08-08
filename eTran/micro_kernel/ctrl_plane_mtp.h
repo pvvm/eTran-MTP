@@ -3,18 +3,24 @@
 #ifndef CTRL_PLANE_MTP
 #define CTRL_PLANE_MTP
 
+extern class eTranTCP *etran_tcp;
+
 struct interm_out {
     __u64 curr_tsc;
     __u32 win;
     __u32 rtt;
 };
 
-//#define MTP_ON 1
+#define MTP_ON 1
+
+void mtp_set_rate(uint32_t cc_idx, uint32_t v) {
+    etran_tcp->_tcp_cc_map_mmap->entry[cc_idx].rate = v;
+}
 
 // Question: here I'm considering that the compiler will simply get a snapshot
 // of ALL values of the map, even if it doesn't make much sense, like rate
 // (also, I'm considering that tcp_connection will have an entry for each too)
-static inline void mtp_snapshot_cc(struct timer_event *ev, struct tcp_connection *c, eTranTCP *etran_tcp)
+static inline void mtp_snapshot_cc(struct timer_event *ev, struct tcp_connection *c)
 {
     __u32 cc_idx = c->cc_idx;
     c->cnt_tx_drops     = etran_tcp->_tcp_cc_map_mmap->entry[cc_idx].cnt_tx_drops;
@@ -134,7 +140,7 @@ void slows_congc_ep(struct timer_event *ev, struct tcp_connection *c, struct int
     c->cc_rexmits = 0;
 }
 
-void set_tx_rate(struct timer_event *ev, struct tcp_connection *c, struct interm_out *int_out) {
+void set_tx_rate_ep(struct timer_event *ev, struct tcp_connection *c, struct interm_out *int_out) {
     uint64_t time, rate;
 
     /* calculate how long [ns] it will take to send a window size's worth */
@@ -157,8 +163,37 @@ void set_tx_rate(struct timer_event *ev, struct tcp_connection *c, struct interm
     if (v > 3125000000)
         v = 3125000000; // 25Gbps
     // Question: is it safe to assume that set_rate function is translated to this?
-    etran_tcp->_tcp_cc_map_mmap->entry[c->cc_idx].rate = v;
+    mtp_set_rate(c->cc_idx, v);
 }
+
+/*void ack_timeout_ep(struct timer_event *ev, struct tcp_connection *c, struct interm_out *int_out) {
+    uint32_t cur_ts = cycles_to_us(curr_tsc);
+    uint32_t rtt = (stats->rtt ? stats->rtt : TCP_RTT_INIT);
+
+    if (stats->txp && stats->c_ackb == 0)
+    {
+        if (c->cnt_tx_pending++ == 0)
+        {
+            c->ts_tx_pending = cur_ts;
+        }
+        else if (c->cnt_tx_pending >= REXMIT_INTS &&
+                 (cur_ts - c->ts_tx_pending) >= std::max(REXMIT_INTS * rtt, (unsigned int)TCP_RTO_MIN))
+        {
+#ifdef DEBUG_TCP
+// printf("Timeout for connection (%p) to(%u)us, rtt(%u)us, send a dummpy packet to eBPF\n", c, (cur_ts - c->ts_tx_pending), rtt);
+#endif
+            if (issue_retransmit(c) == 0)
+            {
+                c->cnt_tx_pending = 0;
+                c->cc_rexmits++;
+            }
+        }
+    }
+    else
+    {
+        c->cnt_tx_pending = 0;
+    }
+}*/
 
 
 #endif

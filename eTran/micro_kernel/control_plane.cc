@@ -1121,6 +1121,7 @@ static void *control_loop(void *arg)
         }*/
 
         /* decide how long to block */
+        // TODO: transform this into per-connection timers (low priority)
         uint64_t t = cycles_to_us(tcp_e - tcp_s);
         uint64_t sleep_time = next_tcp_cc_to_tsc == UINT64_MAX ? TICK_US: CC_INTERVAL_US;
         if (t < sleep_time)

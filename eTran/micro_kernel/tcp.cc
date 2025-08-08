@@ -994,8 +994,10 @@ static inline void handle_retransmission(struct tcp_connection *c, struct bpf_cc
 void poll_tcp_cc_to(void)
 {
     struct tcp_connection *c;
+    #ifndef MTP_ON
     struct bpf_cc_snapshot stats;
     uint32_t last;
+    #endif
     uint64_t curr_tsc = get_cycles();
 
     std::list<struct tcp_connection *> to_put;
@@ -1073,13 +1075,13 @@ void poll_tcp_cc_to(void)
         struct interm_out int_out;
         // This function will be by default (simply get the latest snapshot of shared context values)
         // Also, we can consider that timer events instantiated in 
-        mtp_snapshot_cc(ev, c, etran_tcp);
+        mtp_snapshot_cc(&ev, c);
 
-        slows_congc_ep(ev, c, &int_out);
-        set_tx_rate(ev, c, &int_out);
+        slows_congc_ep(&ev, c, &int_out);
+        set_tx_rate_ep(&ev, c, &int_out);
+        //ack_timeout_ep(&ev, c, &int_out);
         #else
         snapshot_cc(&stats, c->cc_idx);
-        #endif
         //printf("%u, %u\n", c->cnt_rx_acks, stats.c_acks);
 
         /* calculate difference to last time */
@@ -1128,6 +1130,8 @@ void poll_tcp_cc_to(void)
         }
 
         handle_retransmission(c, &stats, curr_tsc);
+
+        #endif
 
         c->cc_last_tsc = curr_tsc;
         it++;
