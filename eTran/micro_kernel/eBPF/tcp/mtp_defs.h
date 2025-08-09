@@ -10,6 +10,10 @@
 #define APP_EVENT 1
 #define TIMER_EVENT 0
 
+struct ts_option {
+    __u32 desired_tx_ts;
+};
+
 struct TCPBP {
     __u16 src_port;
     __u16 dest_port;
@@ -17,6 +21,7 @@ struct TCPBP {
     __u32 ack_seq;
     bool is_ack;
     __u16 rwnd_size;
+    struct ts_option ts_opt;
 };
 
 struct interm_out {
@@ -33,6 +38,7 @@ struct app_timer_event {
     __u8 type;
     // APP fields
     __u32 data_size;
+    __u32 timestamp;
 
     // TIMER fields
     __u32 seq_num;

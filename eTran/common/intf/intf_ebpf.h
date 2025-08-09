@@ -103,6 +103,7 @@ struct slow_path_info {
 #define TCP_MAX_RTT 100000
 
 struct timer_event {
+    __u64 curr_tsc;
 };
 
 struct bpf_cc {

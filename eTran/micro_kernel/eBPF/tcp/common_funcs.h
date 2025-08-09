@@ -37,6 +37,24 @@ __u32 ack_prod[MAX_CPU];
 SEC(".bss.ack_cons")
 __u32 ack_cons[MAX_CPU];
 
+// Fill IP header except for addresses
+static __always_inline void fill_ip_hdr(struct iphdr *iph, __u32 payload_len, bool ece)
+{
+    /* fill ip header */
+    iph->ihl = 5;
+    iph->version = 4;
+    iph->tos = ece ? IPTOS_ECN_ECT0 : 0;
+    iph->tot_len = bpf_htons(sizeof(struct iphdr) + sizeof(struct tcphdr) + TS_OPT_SIZE + payload_len);
+    iph->id = bpf_htons(0);
+    iph->frag_off = 0;
+    iph->ttl = 0xff;
+    iph->protocol = IPPROTO_TCP;
+
+    __u64 csum = 0;
+    ipv4_csum_inline(iph, &csum);
+    iph->check = csum;
+}
+
 static __always_inline void set_tcp_flag(struct tcphdr *tcph, __u16 len, __u16 flags)
 {
     tcph->res1 = 0;

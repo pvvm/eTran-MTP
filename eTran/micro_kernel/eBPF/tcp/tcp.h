@@ -198,24 +198,6 @@ static __always_inline __u32 tcp_txavail(const struct bpf_tcp_conn *c)
     return c->rx_remote_avail - c->tx_sent;
 }
 
-// Fill IP header except for addresses
-static __always_inline void fill_ip_hdr(struct iphdr *iph, __u32 payload_len, bool ece)
-{
-    /* fill ip header */
-    iph->ihl = 5;
-    iph->version = 4;
-    iph->tos = ece ? IPTOS_ECN_ECT0 : 0;
-    iph->tot_len = bpf_htons(sizeof(struct iphdr) + sizeof(struct tcphdr) + TS_OPT_SIZE + payload_len);
-    iph->id = bpf_htons(0);
-    iph->frag_off = 0;
-    iph->ttl = 0xff;
-    iph->protocol = IPPROTO_TCP;
-
-    __u64 csum = 0;
-    ipv4_csum_inline(iph, &csum);
-    iph->check = csum;
-}
-
 // Fill TCP header excpet for ports
 static __always_inline void fill_tcp_hdr(struct iphdr *iph, struct tcphdr *tcph, struct bpf_tcp_conn *c, __u32 tgt_ts, void *data_end, __u16 flags)
 {
@@ -328,6 +310,7 @@ static __always_inline int tcp_tx_process(struct iphdr *iph, struct tcphdr *tcph
 
     TCP_LOCK(c);
 
+    #ifndef MTP_ON
     /* Timeout packet from slowpath, process it first */
     if (unlikely(data_meta->tx.flag & FLAG_TO)) {
         if (!c->tx_sent) {
@@ -349,6 +332,7 @@ static __always_inline int tcp_tx_process(struct iphdr *iph, struct tcphdr *tcph
         // bpf_printk("Timeout triggers fast retransmission");
         return XDP_PASS; // redirect to userspace
     }
+    #endif
 
     /* update receving buffer space */
     if (rx_bump) {
@@ -400,9 +384,14 @@ static __always_inline int tcp_tx_process(struct iphdr *iph, struct tcphdr *tcph
 
     #ifdef MTP_ON
     struct interm_out int_out;
-    struct TCPBP bp = send_ep(ev, c, &int_out, data_meta);
-    mtp_fill_tcp_hdr(tcph, c, desired_tx_ts, data_end, 0, &bp);
-    fill_ip_hdr(iph, payload_len, c->ecn_enable);
+    ev->timestamp = ref_ts;
+    if(ev->type == APP_EVENT) {
+        send_ep(ev, c, &int_out, data_meta, cc, tcph, iph, data_end);
+    } else if(ev->type == TIMER_EVENT) {
+        int xdp_op = ack_timeout_xdp_ep(ev, c, &int_out, data_meta, cc);
+        TCP_UNLOCK(c);
+        return xdp_op;
+    }
     #else
     fill_tcp_hdr(iph, tcph, c, desired_tx_ts, data_end, 0);
     fill_ip_hdr(iph, payload_len, c->ecn_enable);

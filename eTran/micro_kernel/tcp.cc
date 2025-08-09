@@ -1072,6 +1072,7 @@ void poll_tcp_cc_to(void)
         /* snapshot cc */
         #ifdef MTP_ON
         struct timer_event ev;
+        ev.curr_tsc = curr_tsc;
         struct interm_out int_out;
         // This function will be by default (simply get the latest snapshot of shared context values)
         // Also, we can consider that timer events instantiated in 
@@ -1079,7 +1080,7 @@ void poll_tcp_cc_to(void)
 
         slows_congc_ep(&ev, c, &int_out);
         set_tx_rate_ep(&ev, c, &int_out);
-        //ack_timeout_ep(&ev, c, &int_out);
+        ack_timeout_ep(&ev, c, &int_out);
         #else
         snapshot_cc(&stats, c->cc_idx);
         //printf("%u, %u\n", c->cnt_rx_acks, stats.c_acks);

@@ -4,7 +4,7 @@
 #include "common_funcs.h"
 
 // Fill TCP header excpet for ports
-static __always_inline void mtp_fill_tcp_hdr(struct tcphdr *tcph, struct bpf_tcp_conn *c, __u32 tgt_ts, void *data_end, __u16 flags,
+static __always_inline void mtp_fill_tcp_hdr(struct tcphdr *tcph, struct bpf_tcp_conn *c, void *data_end, __u16 flags,
     struct TCPBP *bp)
 {
     __u32 tx_seq = bp->seq_num;
@@ -25,7 +25,7 @@ static __always_inline void mtp_fill_tcp_hdr(struct tcphdr *tcph, struct bpf_tcp
 
     ts_opt->kind = TCPI_OPT_TIMESTAMPS;
     ts_opt->length = sizeof(*ts_opt) / 4;
-    ts_opt->ts_val = bpf_htonl(tgt_ts);
+    ts_opt->ts_val = bpf_htonl(bp->ts_opt.desired_tx_ts);
     ts_opt->ts_ecr = bpf_htonl(ts_ecr);
     
     tcph->window = bpf_htons(rx_wnd) >> TCP_WND_SCALE;
@@ -35,8 +35,15 @@ static __always_inline void mtp_fill_tcp_hdr(struct tcphdr *tcph, struct bpf_tcp
     tcph->check = 0;
 }
 
-static __always_inline struct TCPBP send_ep
-(struct app_timer_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta) {
+static __always_inline void mtp_pkt_gen_for_xdp_egress(struct TCPBP bp, struct bpf_tcp_conn *c,
+    struct tcphdr *tcph, struct iphdr *iph, void *data_end, __u32 data_size) {
+    mtp_fill_tcp_hdr(tcph, c, data_end, 0, &bp);
+    fill_ip_hdr(iph, data_size, c->ecn_enable);
+}
+
+static __always_inline struct TCPBP send_ep (struct app_timer_event *ev, struct bpf_tcp_conn *c,
+    struct interm_out *int_out, struct meta_info *data_meta, struct bpf_cc *cc, struct tcphdr *tcph,
+    struct iphdr *iph, void *data_end) {
     // Question: the problem of having this instruction here is that all packets arriving to XDP_EGRESS
     // will execute it. At first, this is okay if we consider that will only be doing this for
     // packets representing app events. However, this is problematic for retransmissions, since they will
@@ -57,18 +64,17 @@ static __always_inline struct TCPBP send_ep
     bp.ack_seq = c->rx_next_seq;
     bp.rwnd_size = c->rx_avail;
 
-    c->tx_next_seq += ev->data_size;
+    __u64 ns_delta = (__u64)1000000000 * ev->data_size / cc->rate;
+    __u64 desired_tx_ts = cc->prev_desired_tx_ts + ns_delta;
+    desired_tx_ts = max(ev->timestamp, desired_tx_ts);
+    cc->prev_desired_tx_ts = desired_tx_ts;
+    bp.ts_opt.desired_tx_ts = desired_tx_ts;
 
-    // Question: in MTP we calculate the period of time for the timeout in an EP (RTO) and use it across th
-    // code. This seems fine in our back end because everything is done in XDP with bpf_timer.
-    // Meanwhile, here, the period of time for the timeout is calculated in the control path, and this calculation
-    // isn't triggered by anything like an event, it's just in a busy loop.
-    // Can we say that the EPs in XDP can only set the timer as active or not, while the control path and a timer
-    // EP implemented in it will calculate this timeout?
-    // For example, if we still used RTO (which they don't use), the send_ep would only set a boolean specifying
-    // that this timer is active. Meanwhile, in the control path, after doing all the timer triggered operations,
-    // will calculate the next RTO and reset the timer.
-    // Can we consider that timer EPs are the only ones able to restart timers? (To simulate the busy loop)
+    // Note: I am abstracting the seg_data and pkt_gen_instr in this function.
+    // The 5th argument is the second argument of seg_data (the length)
+    mtp_pkt_gen_for_xdp_egress(bp, c, tcph, iph, data_end, ev->data_size);
+
+    c->tx_next_seq += ev->data_size;
 
     // TODO: add functions to initialize timers
 
@@ -78,25 +84,59 @@ static __always_inline struct TCPBP send_ep
 static __always_inline struct app_timer_event parse_req_to_app_event(struct meta_info *data_meta) {
     struct app_timer_event ev;
     ev.type = APP_EVENT;
-    // Question: this could work, but the thing is that this is target-specific, i.e.
-    // it is a part of eTran's TX metadata. Also, it is the length for that batch of packets
-    // (given the userspace window)
-    // We may need to have a way to send the application and timer event to XDP_EGRESS without
-    // using the metadata (how about some metadata after the payload?)
     ev.data_size = data_meta->tx.plen;
     return ev;
+}
+
+static __always_inline int ack_timeout_xdp_ep (struct app_timer_event *ev, struct bpf_tcp_conn *c,
+    struct interm_out *int_out, struct meta_info *data_meta, struct bpf_cc *cc) {
+
+    if (!c->tx_sent) {
+        return XDP_DROP;
+    }
+    __u32 go_back_bytes = c->tx_sent;
+    __u32 x;
+
+    /* reset flow state as if we never transmitted those segments */
+    c->rx_dupack_cnt = 0;
+
+    c->tx_next_seq -= go_back_bytes;
+    if (c->tx_next_pos >= go_back_bytes) {
+        c->tx_next_pos -= go_back_bytes;
+    } else {
+        x = go_back_bytes - c->tx_next_pos;
+        c->tx_next_pos = c->tx_buf_size - x;
+    }
+
+    c->tx_pending = 0;
+    c->rx_remote_avail += go_back_bytes;
+
+    c->tx_sent = 0;
+    cc->txp = 0;
+
+    /* cut rate by half if first drop in control interval */
+    if (cc->cnt_tx_drops == 0) {
+        cc->rate >>= 1;
+    }
+
+    cc->cnt_tx_drops++;
+
+    data_meta->rx.go_back_pos = c->tx_next_pos;
+    // prepare to redirect to userspace
+    data_meta->rx.qid = POISON_32;
+    data_meta->rx.conn = c->opaque_connection;
+    data_meta->rx.rx_pos = POISON_32;
+    data_meta->rx.poff = POISON_16;
+    data_meta->rx.plen = POISON_16;
+    data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
+    data_meta->rx.go_back_pos |= RECOVERY_MASK;
+    data_meta->rx.ooo_bump = POISON_32;
+    return XDP_PASS; // redirect to userspace
 }
 
 static __always_inline struct app_timer_event parse_req_to_timer_event(struct meta_info *data_meta) {
     struct app_timer_event ev;
     ev.type = TIMER_EVENT;
-    // Question: what will be set here is also a bit complex.
-    // What is in the timer event will be set and reset by EPs (send and ack), in addition to the
-    // timer itself. Meanwhile, the control path will keep track of the timer. When the timer is
-    // reached, it will need to send the timer event associated to that timer back here.
-    // Does that make sense? I wonder if there might be situations where it might be problematic
-
-    // ev.seq_num = data_meta->tx.;
     return ev;
 }
 
@@ -519,21 +559,6 @@ static __always_inline void send_ack(struct net_event *ev, struct bpf_tcp_conn *
     if(!int_out->trigger_ack) {
         return;
     }
-    
-    // Question: eTran has two ways to generate ACKs. One ACK per arriving packet and
-    // ACK coalescing. It seems that they use ACK coalescing by default.
-    // On one hand, using ACK coalescing might be useful to compare with an "optimized" eTran,
-    // and might also be useful to see how that can be implemented in MTP.
-    // However, the way they trigger the ACK enqueue is a bit different from our approach.
-    // An ACK is enqueued if: the current packet's flow is different from the last, which
-    // results in enqueueing values from the previous packet's context; or if XDP_GEN runs,
-    // meaning a NAPI batch is finished.
-    // But how can we represent these ideas in MTP? Storing flow IDs between packets may be
-    // a bit contrived, and I think that the context wouldn't serve for that, since it's per-flow.
-    // And MTP won't have a way to understand a NAPI batch.
-
-    // Looks to me that using the per-packet ACK would better match what we have and,
-    // probably, MTP. I'll be following this approach for now
 
     struct TCPBP bp;
     bp.src_port = c->local_port;
@@ -548,116 +573,3 @@ static __always_inline void send_ack(struct net_event *ev, struct bpf_tcp_conn *
     // doesn't have data (goes to XDP_GEN)
     mtp_pkt_gen_for_xdp_gen(bp, c, cpu);
 }
-
-#if 0
-static __always_inline int app_ev_dispatcher(struct app_timer_event *ev, struct bpf_tcp_conn *c, struct meta_info *data_meta) {
-    struct interm_out int_out;
-    int_out.drop = 1;
-
-    // TODO: implement the app EP, but (hopefully it will be the most straight to the point)
-    return 0;
-}
-
-
-static __always_inline void ack_timeout_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta) {
-    // Halve rate
-    c->rate >>= 1;
-    // TODO: halve window too?
-    //c->
-    __u32 go_back_bytes = c->data_end - c->send_una;
-    c->tx_next_seq -= go_back_bytes;
-
-    // Question: to translate the unseg_data into this section of code, we would probably
-    // need to just get the second argument and use it here.
-    data_meta->rx.go_back_pos = go_back_bytes;
-    // prepare to redirect to userspace
-    data_meta->rx.qid = POISON_32;
-    data_meta->rx.conn = c->opaque_connection;
-    data_meta->rx.rx_pos = POISON_32;
-    data_meta->rx.poff = POISON_16;
-    data_meta->rx.plen = POISON_16;
-    data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
-    data_meta->rx.go_back_pos |= RECOVERY_MASK;
-    data_meta->rx.ooo_bump = POISON_32;
-
-    int_out->drop = 0;
-}
-
-static __always_inline int timer_ev_dispatcher(struct app_timer_event *ev, struct bpf_tcp_conn *c, struct meta_info *data_meta) {
-    struct interm_out int_out;
-    int_out.drop = 1;
-    ack_timeout_ep(ev, c, &int_out, data_meta);
-
-    return int_out.drop ? XDP_DROP : XDP_PASS;
-}
-
-static __always_inline void rto_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta, __u32 cpu) {
-    // Question: should we use their implementation of tcp_valid_ack?
-    if(ev->ack_seq < c->send_una || c->tx_next_seq < ev->ack_seq) {
-        int_out->skip_ack_eps = 1;
-        return;
-    }
-    __u32 granularity_g = 1;
-    // Question: they calculate RTT, while we use a constant. Should we do the same as them?
-    __u32 RTT = 100000000;
-
-    if(c->first_rto) {
-        c->SRTT = RTT;
-        c->RTTVAR = RTT / 2;
-        if(granularity_g >= 4 * c->RTTVAR) {
-            c->RTO = c->SRTT + granularity_g;
-        } else {
-            c->RTO = c->SRTT + 4 * c->RTTVAR;
-        }
-        c->first_rto = 0;
-
-    } else {
-        c->RTTVAR = (1 - 1/4) * c->RTTVAR + 1/4 * llabs(c->SRTT - RTT);
-        c->SRTT = (1 - 1/8) * c->SRTT + 1/8 * RTT;
-        if(granularity_g >= 4 * c->RTTVAR) {
-            c->RTO = c->SRTT + granularity_g;
-        } else {
-            c->RTO = c->SRTT + 4 * c->RTTVAR;
-        }
-    }
-}
-
-static __always_inline void slows_congc_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta, __u32 cpu) {
-    if(int_out->skip_ack_eps)
-        return;
-    
-    if(int_out->change_cwnd) {
-        // Question: the same from the MTP file.
-        // In their implementation, they run slow start if the number of drops, packets with ECN, and retransmissions
-        // is zero. Meanwhile, this decision is done in ours based on the congestion window size and ssthresh.
-        // Which should we use?
-        // Probably we cannot use their exact implementation here (since it is supposed to happen over intervals
-        // in control path)
-
-        // Question: in the control path, they have the DCTCP window, which is increased with SS or CA.
-        // And, then, this window is converted into rate.
-        // Is it possible for us to keep working only with rate (increasing and decreasing it)?
-        // i.e. no need to keep a window and converting it
-        // I don't think we can do that though
-    }
-}
-
-// Question: do we need to have a scheduler in eTran?
-// I guess that the only queue that we could have would be timer, but I'm not sure if that
-// would be necessary
-
-static __always_inline int net_ev_dispatcher(struct net_event *ev, struct bpf_tcp_conn *c, struct meta_info *data_meta, __u32 cpu) {
-    struct interm_out int_out;
-    int_out.drop = 1;
-    if(ev->minor_type == NET_EVENT_ACK) {
-        rto_ep(ev, c, &int_out, data_meta, cpu);
-        fast_retr_rec_ep(ev, c, &int_out, data_meta, cpu);
-        slows_congc_ep(ev, c, &int_out, data_meta, cpu);
-        ack_net_ep(ev, c, &int_out, data_meta, cpu);
-    } else if (ev->minor_type == NET_EVENT_DATA) {
-        data_net_ep(ev, c, &int_out, data_meta, cpu);
-        send_ack(ev, c, &int_out, data_meta, cpu);
-    }
-    return int_out.drop ? XDP_DROP : XDP_REDIRECT;
-}
-#endif
