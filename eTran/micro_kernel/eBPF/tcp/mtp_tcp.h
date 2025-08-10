@@ -41,7 +41,7 @@ static __always_inline void mtp_pkt_gen_for_xdp_egress(struct TCPBP bp, struct b
     fill_ip_hdr(iph, data_size, c->ecn_enable);
 }
 
-static __always_inline struct TCPBP send_ep (struct app_timer_event *ev, struct bpf_tcp_conn *c,
+static __always_inline void send_ep (struct app_timer_event *ev, struct bpf_tcp_conn *c,
     struct interm_out *int_out, struct meta_info *data_meta, struct bpf_cc *cc, struct tcphdr *tcph,
     struct iphdr *iph, void *data_end) {
     // Question: the problem of having this instruction here is that all packets arriving to XDP_EGRESS
@@ -76,9 +76,9 @@ static __always_inline struct TCPBP send_ep (struct app_timer_event *ev, struct 
 
     c->tx_next_seq += ev->data_size;
 
-    // TODO: add functions to initialize timers
+    cc->txp = c->tx_next_seq != c->send_una;
 
-    return bp;
+    // TODO: add functions to initialize timers
 }
 
 static __always_inline struct app_timer_event parse_req_to_app_event(struct meta_info *data_meta) {
@@ -91,11 +91,11 @@ static __always_inline struct app_timer_event parse_req_to_app_event(struct meta
 static __always_inline int ack_timeout_xdp_ep (struct app_timer_event *ev, struct bpf_tcp_conn *c,
     struct interm_out *int_out, struct meta_info *data_meta, struct bpf_cc *cc) {
 
-    if (!c->tx_sent) {
+    if (c->tx_next_seq == c->send_una) {
         return XDP_DROP;
     }
-    __u32 go_back_bytes = c->tx_sent;
-    __u32 x;
+
+    __u32 go_back_bytes = c->tx_next_seq - c->send_una;
 
     /* reset flow state as if we never transmitted those segments */
     c->rx_dupack_cnt = 0;
@@ -104,14 +104,12 @@ static __always_inline int ack_timeout_xdp_ep (struct app_timer_event *ev, struc
     if (c->tx_next_pos >= go_back_bytes) {
         c->tx_next_pos -= go_back_bytes;
     } else {
-        x = go_back_bytes - c->tx_next_pos;
-        c->tx_next_pos = c->tx_buf_size - x;
+        c->tx_next_pos = c->tx_buf_size - (go_back_bytes - c->tx_next_pos);
     }
 
-    c->tx_pending = 0;
+    //c->tx_pending = 0;
     c->rx_remote_avail += go_back_bytes;
 
-    c->tx_sent = 0;
     cc->txp = 0;
 
     /* cut rate by half if first drop in control interval */
@@ -163,47 +161,32 @@ static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tc
     //}
     int_out->drop = 1;
 
-    // Question: in eTran the __u32-long values like tx_next_seq, send_una, etc, quickly
-    // reach the limit of this size, which result in them requiring this part.
-    // But in ours we didn't have something that complex. Are we doing something wrong?
     __u32 exp_ack_first = c->send_una;
     __u32 exp_ack_last = c->tx_next_seq;
 
     // allow receving ack that we haven't sent yet, this is probably caused by retransmission
-    exp_ack_last += c->tx_pending;
+    //exp_ack_last += c->tx_pending;
     
     if (exp_ack_first <= exp_ack_last) {
         if (ev->ack_seq < exp_ack_first || ev->ack_seq > exp_ack_last) {
             return;
         }
-
-        // 0-----exp_ack_first-----ack_seq-----exp_ack_last-----__UINT32_MAX__
         int_out->num_acked_bytes = ev->ack_seq - exp_ack_first;
     } else {
         if (exp_ack_first > ev->ack_seq && ev->ack_seq > exp_ack_last) {
             return;
         }
-        // 0-----exp_ack_first-----------------exp_ack_first--ack_seq---__UINT32_MAX__
-        // 0--ack_seq---exp_ack_first-----------------exp_ack_first-----__UINT32_MAX__
         int_out->num_acked_bytes = ev->ack_seq - exp_ack_first;
-    }
-    if(int_out->num_acked_bytes > c->tx_sent) {
-        int_out->num_acked_bytes = 0;
-        return;
     }
     
     // Redirect it to userspace
     int_out->drop = 0;
 
-    // Question: we need to have a way to differentiate context fields that are shared and those that aren't
-    // between userspace and XDP (maybe those used in timer events?)
     cc->cnt_rx_ack_bytes += int_out->num_acked_bytes;
     if(ev->ecn_mark)
         cc->cnt_rx_ecn_bytes += int_out->num_acked_bytes;
 
-    // Question: this field tx_sent is widely used in their code. Should we simply use it in MTP too?
-    c->tx_sent -= int_out->num_acked_bytes;
-    cc->txp = c->tx_sent > 0;
+    cc->txp = c->tx_next_seq != c->send_una;
 
     int_out->change_cwnd = 1;
 
@@ -222,6 +205,7 @@ static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tc
             //c->rx_dupack_cnt = 0;
 
             go_back_bytes = c->tx_next_seq - c->send_una;
+
             c->tx_next_seq -= go_back_bytes;
             if (c->tx_next_pos >= go_back_bytes) {
                 c->tx_next_pos -= go_back_bytes;
@@ -232,9 +216,8 @@ static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tc
 
             // Question: this section of code isn't covered in MTP (is used by the other parts of the code)
             // If everything works out by adding our EPs, we can remove this part safely
-            c->tx_pending = 0;
+            //c->tx_pending = 0;
             c->rx_remote_avail += go_back_bytes;
-            c->tx_sent = 0;
             cc->txp = 0;
 
             // Question: in eTran they don't decrease the DCTCP window both in fast retransmission and timeout.
@@ -486,7 +469,6 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
     if ((c->rx_remote_avail < ev->rwnd_size << TCP_WND_SCALE)) {
         /* update TCP receive window */
         c->rx_remote_avail = ev->rwnd_size << TCP_WND_SCALE;
-        // bpf_printk("(%u),ack_seq(%u), c->rx_remote_avail(%u), c->tx_sent(%u)", tx_bump, ack_seq, c->rx_remote_avail, c->tx_sent);
     }
 
     // Question: is it okay to assume that c->rx_next_seq will be a value that will be in eTran by default

@@ -192,11 +192,11 @@ static __always_inline int enqueue_ack(struct bpf_tcp_conn *c, struct bpf_tcp_ac
     return 0;
 }
 
-static __always_inline __u32 tcp_txavail(const struct bpf_tcp_conn *c)
+/*static __always_inline __u32 tcp_txavail(const struct bpf_tcp_conn *c)
 {
-    /* flow control window */
+    // flow control window 
     return c->rx_remote_avail - c->tx_sent;
-}
+}*/
 
 // Fill TCP header excpet for ports
 static __always_inline void fill_tcp_hdr(struct iphdr *iph, struct tcphdr *tcph, struct bpf_tcp_conn *c, __u32 tgt_ts, void *data_end, __u16 flags)
@@ -368,17 +368,14 @@ static __always_inline int tcp_tx_process(struct iphdr *iph, struct tcphdr *tcph
         return XDP_DROP;
     }
 
-    if (tx_pending)
-        c->tx_pending += tx_pending;
-
-    __u32 avail = tcp_txavail(c);
+    /*__u32 avail = tcp_txavail(c);
 
     if (unlikely(avail < payload_len)) {
         // FIXME
         // bpf_printk("c->rx_remote_avail(%u), c->tx_sent(%u), c->tx_avail(%u), payload_len(%u)", 
         //     c->rx_remote_avail, c->tx_sent, c->tx_avail, payload_len);
         // bpf_printk("avail(%u) < payload_len(%u)", avail, payload_len);
-    }
+    }*/
 
     __u64 desired_tx_ts = cc_get_desired_tx_ts(cc, ref_ts, payload_len);
 
@@ -393,17 +390,20 @@ static __always_inline int tcp_tx_process(struct iphdr *iph, struct tcphdr *tcph
         return xdp_op;
     }
     #else
+    if (tx_pending)
+        c->tx_pending += tx_pending;
+
     fill_tcp_hdr(iph, tcph, c, desired_tx_ts, data_end, 0);
     fill_ip_hdr(iph, payload_len, c->ecn_enable);
     c->tx_next_seq += payload_len;
+    c->tx_sent += payload_len;
+    cc->txp = c->tx_sent > 0;
+    c->tx_pending -= payload_len;
     #endif
 
     c->tx_next_pos += payload_len;
     if (c->tx_next_pos >= c->tx_buf_size)
         c->tx_next_pos -= c->tx_buf_size;
-    c->tx_sent += payload_len;
-    cc->txp = c->tx_sent > 0;
-    c->tx_pending -= payload_len;
 
     // /*** NO CC ***/
     // TCP_UNLOCK(c);
@@ -418,9 +418,15 @@ static __always_inline int tcp_tx_process(struct iphdr *iph, struct tcphdr *tcph
     #endif
 
     #ifdef BYPASS_RL
+    #ifdef MTP_ON
+    if ((!nr_pkts_in_tw[cpu] || c->tx_next_seq - c->send_una == payload_len) && desired_tx_ts <= ref_ts) {
+        goto bypass_rl;
+    }
+    #else
     if ((!nr_pkts_in_tw[cpu] || c->tx_sent == payload_len) && desired_tx_ts <= ref_ts) {
         goto bypass_rl;
     }
+    #endif
     #endif
 
     TCP_UNLOCK(c);
