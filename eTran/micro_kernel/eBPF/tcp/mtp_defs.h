@@ -25,10 +25,10 @@ struct TCPBP {
 };
 
 struct interm_out {
-    __u8 change_cwnd;
-    __u8 skip_ack_eps;
-    __u8 trigger_ack;
-    __u8 drop;
+    bool change_cwnd;
+    bool skip_ack_eps;
+    bool trigger_ack;
+    bool drop;
     __u32 num_acked_bytes;
     __u32 go_back_pos;
 };
@@ -57,6 +57,7 @@ struct net_event {
     // SHARED
     __u32 seq_num;
     bool ecn_mark;
+    __u32 timestamp;
 };
 
 #endif

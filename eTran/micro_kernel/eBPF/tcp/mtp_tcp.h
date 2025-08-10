@@ -37,6 +37,10 @@ static __always_inline void mtp_fill_tcp_hdr(struct tcphdr *tcph, struct bpf_tcp
 
 static __always_inline void mtp_pkt_gen_for_xdp_egress(struct TCPBP bp, struct bpf_tcp_conn *c,
     struct tcphdr *tcph, struct iphdr *iph, void *data_end, __u32 data_size) {
+    // Note: here, I consider that pkt_gen_instr will also abstract the increase of tx_next_pos
+    c->tx_next_pos += data_size;
+    if (c->tx_next_pos >= c->tx_buf_size)
+        c->tx_next_pos -= c->tx_buf_size;
     mtp_fill_tcp_hdr(tcph, c, data_end, 0, &bp);
     fill_ip_hdr(iph, data_size, c->ecn_enable);
 }
@@ -44,13 +48,7 @@ static __always_inline void mtp_pkt_gen_for_xdp_egress(struct TCPBP bp, struct b
 static __always_inline void send_ep (struct app_timer_event *ev, struct bpf_tcp_conn *c,
     struct interm_out *int_out, struct meta_info *data_meta, struct bpf_cc *cc, struct tcphdr *tcph,
     struct iphdr *iph, void *data_end) {
-    // Question: the problem of having this instruction here is that all packets arriving to XDP_EGRESS
-    // will execute it. At first, this is okay if we consider that will only be doing this for
-    // packets representing app events. However, this is problematic for retransmissions, since they will
-    // also be coming here.
-    // So, we can either have a way to differentiate retransmitted packets (which won't be that trivial and
-    // will require changes to userspace and have a way to send this notification), decrease data_end when
-    // retransmits happen, or adapt the code to not use this variable.
+
     c->data_end += ev->data_size;
 
     struct TCPBP bp;
@@ -59,8 +57,7 @@ static __always_inline void send_ep (struct app_timer_event *ev, struct bpf_tcp_
     bp.seq_num = c->tx_next_seq;
     bp.is_ack = false;
 
-    // Question: should be values not specified in MTP be filled here with default values by the compiler?
-    // For now, I'm filling with what they should have
+    // TODO: add other values to BP and add default values
     bp.ack_seq = c->rx_next_seq;
     bp.rwnd_size = c->rx_avail;
 
@@ -101,16 +98,13 @@ static __always_inline int ack_timeout_xdp_ep (struct app_timer_event *ev, struc
     c->rx_dupack_cnt = 0;
 
     c->tx_next_seq -= go_back_bytes;
-    if (c->tx_next_pos >= go_back_bytes) {
-        c->tx_next_pos -= go_back_bytes;
-    } else {
-        c->tx_next_pos = c->tx_buf_size - (go_back_bytes - c->tx_next_pos);
-    }
 
     //c->tx_pending = 0;
     c->rx_remote_avail += go_back_bytes;
 
     cc->txp = 0;
+
+    c->data_end -= go_back_bytes;
 
     /* cut rate by half if first drop in control interval */
     if (cc->cnt_tx_drops == 0) {
@@ -119,6 +113,23 @@ static __always_inline int ack_timeout_xdp_ep (struct app_timer_event *ev, struc
 
     cc->cnt_tx_drops++;
 
+    // Question IMPORTANT:
+    // In MTP, when we want to retransmit the packet with unseg_data,
+    // we specify that it should retransmit from send_una.
+    // However, in eTran we have to send the position in the TX buffer
+    // that should start retransmitting from (tx_next_pos).
+    // To get this position, we have to know how many go_back_bytes
+    // we have to decrease the position.
+    // We can obtain the go_back_bytes from send_next - send_una.
+    // But, in unseg_data/pkt_gen_instr we just specify send_una as
+    // one the arguments. So, how can we get the go_back_bytes to
+    // get tx_next_pos?
+    // (This whole thing is a problem because we want to abstract tx_next_pos)
+    if (c->tx_next_pos >= go_back_bytes) {
+        c->tx_next_pos -= go_back_bytes;
+    } else {
+        c->tx_next_pos = c->tx_buf_size - (go_back_bytes - c->tx_next_pos);
+    }
     data_meta->rx.go_back_pos = c->tx_next_pos;
     // prepare to redirect to userspace
     data_meta->rx.qid = POISON_32;
@@ -207,6 +218,8 @@ static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tc
             go_back_bytes = c->tx_next_seq - c->send_una;
 
             c->tx_next_seq -= go_back_bytes;
+
+            // TODO: move this to inside ack_net_ep and make this function copy go_back_bytes to int_out
             if (c->tx_next_pos >= go_back_bytes) {
                 c->tx_next_pos -= go_back_bytes;
             } else {
@@ -219,6 +232,8 @@ static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tc
             //c->tx_pending = 0;
             c->rx_remote_avail += go_back_bytes;
             cc->txp = 0;
+
+            c->data_end -= go_back_bytes;
 
             // Question: in eTran they don't decrease the DCTCP window both in fast retransmission and timeout.
             // They confirmed it is a bug.
@@ -265,14 +280,10 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
         return;
     }
 
-    // Question (not really):
-    // Think about how we'll deal with the if(ctx.lwu_seq < ev.seq_num...) here, and so on
-    // __u32 rwindow = ev->rwnd_size << TCP_WND_SCALE;
     if(!int_out->drop) {
         if(int_out->num_acked_bytes || c->rx_remote_avail < (ev->rwnd_size << TCP_WND_SCALE))
             c->rx_remote_avail = ev->rwnd_size << TCP_WND_SCALE;
         
-        // Question: same from MTP file. Do we have a function to get current timestamps in MTP?
         if(ev->ts_ecr && int_out->num_acked_bytes) {
             __u32 now = bpf_ktime_get_ns();
             __u32 rtt = (now - ev->ts_ecr);
@@ -287,18 +298,6 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
             }
         }
     }
-
-    // Question: eTran doesn't have a data_end value in the context.
-    // This value represents the total amount of bytes to send (increased in the send EP).
-    // Does it make sense to send the app_event as an element of the TX metadata, and use
-    // it in the EP implemented in XDP_EGRESS? I think it makes sense
-    // But the problem is that we cannot use the metadatas, because it seems that their
-    // current metadata are already using the maximum size (32 bytes). So, we have the following options:
-    // Use the current information that they have in the metadatas (they send the size of a batch). But this wouldn't be general
-    // Repurpose their metadata. But that would probably break the whole eTran system (also, still limited with the 32 bytes)
-    // Have another way to send this information. But it is probably hard to synchronize userspace and XDP_EGRESS?
-    // A: I just added a data_end in the context and increase for each app_event from its data_len size.
-    // This works because we're considering that each packet reaching XDP_EGRESS is a app event
     
     /*__u32 data_rest = c->data_end - c->tx_next_seq;
     if(data_rest == 0 && ev->ack_seq == c->tx_next_seq) {
@@ -308,9 +307,6 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
         return;
     }*/
 
-    // Question: in eTran they simply send number of ack_bytes to userspace
-    // by redirecting it back as a metadata. It doesn't have something like the whole flush idea.
-    // Maybe we can assume that the last argument of tx_data_flush will be used in rx.ack_bytes?
     __u32 rmlen = int_out->num_acked_bytes;
     if(rmlen > 0) {
         c->send_una = ev->ack_seq;
@@ -330,8 +326,6 @@ static __always_inline __u32 trim_and_handle_ooo(__u32 seq, __u32 *payload_len, 
     __u32 rx_bump = 0;
     __u32 trim_start, trim_end;
     int_out->trigger_ack = true;
-    // Question: in eTran, they do not generate an ACK if the seq num is invalid.
-    // Should we do the same?
     if (unlikely(tcp_valid_rxseq_ooo(c, seq, *payload_len, &trim_start, &trim_end))) {
         int_out->trigger_ack = false;
         //xdp_log_err("Bad seq");
@@ -434,10 +428,6 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
     __u32 cpu, struct bpf_cc *cc) {
 
     // Maybe remove this one if we simply use eTran's solution
-    // Question: similar to the problem before that in eTran the __u32-long values
-    // quickly reach the limit of this size. (Which we didn't have a problem with strangely)
-    // Because of that, the this simple check below might cause packets to be dropped when 
-    // 4294500000B is reached
     /*if((c->rx_avail == 0 && ev->data_len > 0) ||
        (ev->seq_num > c->recv_next + c->rx_avail) ||
        (ev->seq_num + ev->data_len - 1 < c->recv_next)) {
@@ -445,23 +435,6 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
         bpf_printk("What the hell");
         return;
     }*/
-
-    // Question: my idea here is to abstract the sliding window with this whole
-    // trimming and handling OOO algorithm from eTran. Does this sound fair?
-    // But one thing to note is that they use the length of the payload as an
-    // argument, not the seq_num + length of the payload (data_end).
-    // Also, I need to pass the payload by reference, because they may trim
-    // the payload and change its lenght.
-    // Would it change MTP that much if we considered that we are passing
-    // the length instead of data_end?
-
-    // Question: c->rx_avail, which they treat as the local RX window size, 
-    // is changed in this function. Meanwhile, in our MTP implementation, we
-    // never change this value. Can we assume that set() method might be able
-    // to change the RX window size?
-    // Also, we probably need to add a varying RX window size to match with eTran?
-
-    // Question: the trigger_ack boolean is also changed here. What to do in this case?
 
     bool clear_ooo = false;
     __u32 rx_bump = trim_and_handle_ooo(ev->seq_num, &ev->data_len, c, data_meta, int_out, &clear_ooo);
@@ -474,13 +447,6 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
     // Question: is it okay to assume that c->rx_next_seq will be a value that will be in eTran by default
     // and first_unset method can be translated to simply copying this value?
     c->recv_next = c->rx_next_seq;
-
-    // Question: maybe we'll need to use TCP_LOCK across the code.
-    // It seems that this lock is used to access the context c, and it is acquired/released
-    // by the different XDP programs. So, they can run in parallel? It seems so
-    // The problem is where to put the locks. They put at the start of the tcp process functions
-    // and the function that enqueues ACKs.
-    // Maybe we simply add at the start of net_ev_dispatcher and the app dispatcher (if there is one)?
 
     // Question: I wonder if add_data_seg could be translated the section below.
     // ev.data_len would be converted to payload_len and the rest wouldn't
@@ -502,7 +468,7 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
     }
 }
 
-static __always_inline void mtp_pkt_gen_for_xdp_gen(struct TCPBP bp, struct bpf_tcp_conn *c,  __u32 cpu) {
+static __always_inline void mtp_pkt_gen_for_xdp_gen(struct TCPBP *bp, struct bpf_tcp_conn *c,  __u32 cpu) {
     struct bpf_tcp_ack *ack = NULL;
     __u32 prod = ack_prod[cpu];
     __u32 cons = ack_cons[cpu];
@@ -520,16 +486,13 @@ static __always_inline void mtp_pkt_gen_for_xdp_gen(struct TCPBP bp, struct bpf_
 
     ack->local_ip = c->local_ip;
     ack->remote_ip = c->remote_ip;
-    ack->local_port = c->local_port;
-    ack->remote_port = c->remote_port;
-    ack->seq = c->tx_next_seq;
-    ack->ack = c->rx_next_seq;
-    ack->rxwnd = c->rx_avail;
-    ack->is_ack = 1;
-    // Question: similar to other questions, should we add these timestamps?
-    // It seems that they are used to calculate the RTT. In our implementation, we consider it a constant
-    __u32 now = bpf_ktime_get_ns();
-    ack->ts_val = now;
+    ack->local_port = bp->src_port;
+    ack->remote_port = bp->dest_port;
+    ack->seq = bp->seq_num;
+    ack->ack = bp->ack_seq;
+    ack->rxwnd = bp->rwnd_size;
+    ack->is_ack = bp->is_ack;
+    ack->ts_val = bp->ts_opt.desired_tx_ts;
     ack->ts_ecr = c->tx_next_ts;
     c->tx_next_ts = 0;
 
@@ -550,8 +513,9 @@ static __always_inline void send_ack(struct net_event *ev, struct bpf_tcp_conn *
     // TODO: maybe change to rx_next_seq, depending on how we implement the 
     bp.ack_seq = c->recv_next;
     bp.rwnd_size = c->rx_avail;
+    bp.ts_opt.desired_tx_ts = ev->timestamp;
 
-    // Question: this function will be equivalent to pkt_gen_instruction when the pkt_bp
+    // Note: this function will be equivalent to pkt_gen_instruction when the pkt_bp
     // doesn't have data (goes to XDP_GEN)
-    mtp_pkt_gen_for_xdp_gen(bp, c, cpu);
+    mtp_pkt_gen_for_xdp_gen(&bp, c, cpu);
 }

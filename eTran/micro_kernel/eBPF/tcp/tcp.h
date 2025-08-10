@@ -399,11 +399,10 @@ static __always_inline int tcp_tx_process(struct iphdr *iph, struct tcphdr *tcph
     c->tx_sent += payload_len;
     cc->txp = c->tx_sent > 0;
     c->tx_pending -= payload_len;
-    #endif
-
     c->tx_next_pos += payload_len;
     if (c->tx_next_pos >= c->tx_buf_size)
         c->tx_next_pos -= c->tx_buf_size;
+    #endif
 
     // /*** NO CC ***/
     // TCP_UNLOCK(c);
@@ -568,16 +567,18 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
 
     bool clear_ooo = false;
 
-    __u32 now = 0;
     #ifndef ACK_COALESCING
     struct bpf_tcp_ack *ack = NULL;
     #endif
 
+    #endif
+    __u32 now = 0;
     if (!rx_cached_ts[cpu])
         now = bpf_ktime_get_ns();
     else
         now = rx_cached_ts[cpu];
 
+    #ifndef MTP_ON
     /* trigger an ACK if there is payload (even if we discard it) */
     if (payload_len) {
         trigger_ack = true;
@@ -606,8 +607,9 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
 
     TCP_LOCK(c);
     
-    struct interm_out int_out;
     #ifdef MTP_ON
+    struct interm_out int_out;
+    ev->timestamp = now;
     if(ev->minor_type == NET_EVENT_ACK) {
         cc->cnt_rx_acks++;
         fast_retr_rec_ep(ev, c, &int_out, data_meta, cpu, cc);
