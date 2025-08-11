@@ -7,6 +7,7 @@
 #define NET_EVENT_ACK 1
 #define NET_EVENT_DATA 0
 
+#define NET_EVENT 2
 #define APP_EVENT 1
 #define TIMER_EVENT 0
 

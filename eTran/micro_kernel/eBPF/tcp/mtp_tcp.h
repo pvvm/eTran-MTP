@@ -37,12 +37,78 @@ static __always_inline void mtp_fill_tcp_hdr(struct tcphdr *tcph, struct bpf_tcp
 
 static __always_inline void mtp_pkt_gen_for_xdp_egress(struct TCPBP bp, struct bpf_tcp_conn *c,
     struct tcphdr *tcph, struct iphdr *iph, void *data_end, __u32 data_size) {
+
     // Note: here, I consider that pkt_gen_instr will also abstract the increase of tx_next_pos
     c->tx_next_pos += data_size;
     if (c->tx_next_pos >= c->tx_buf_size)
         c->tx_next_pos -= c->tx_buf_size;
     mtp_fill_tcp_hdr(tcph, c, data_end, 0, &bp);
     fill_ip_hdr(iph, data_size, c->ecn_enable);
+}
+
+static __always_inline void mtp_pkt_gen_for_retransmission(struct bpf_tcp_conn *c, __u32 go_back_bytes,
+    __u8 ev_type, struct meta_info *data_meta) {
+
+    // Note: here, I consider that pkt_gen_instr will also abstract the increase of tx_next_pos
+    if (c->tx_next_pos >= go_back_bytes) {
+        c->tx_next_pos -= go_back_bytes;
+    } else {
+        c->tx_next_pos = c->tx_buf_size - (go_back_bytes - c->tx_next_pos);
+    }
+
+    data_meta->rx.go_back_pos = c->tx_next_pos;
+    data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
+    data_meta->rx.rx_pos = POISON_32;
+    data_meta->rx.poff = POISON_16;
+    data_meta->rx.plen = POISON_16;
+
+    if(ev_type == TIMER_EVENT) {
+        data_meta->rx.qid = POISON_32;
+        data_meta->rx.conn = c->opaque_connection;
+        data_meta->rx.go_back_pos |= RECOVERY_MASK;
+        data_meta->rx.ooo_bump = POISON_32;
+    } else if(ev_type == NET_EVENT) {
+        data_meta->rx.go_back_pos |= RECOVERY_MASK;
+    }
+}
+
+static __always_inline void mtp_tx_data_flush(struct bpf_tcp_conn *c, struct interm_out *int_out,
+    __u32 rmlen, struct meta_info *data_meta) {
+    if(rmlen > 0 || xsk_budget_avail(c)) {
+        int_out->drop = 0;
+        data_meta->rx.ack_bytes = rmlen;
+        data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
+        data_meta->rx.rx_pos = POISON_32;
+        data_meta->rx.poff = POISON_16;
+        data_meta->rx.plen = POISON_16;
+    }
+}
+
+
+static __always_inline struct app_timer_event parse_req_to_app_event(struct meta_info *data_meta) {
+    struct app_timer_event ev;
+    ev.type = APP_EVENT;
+    ev.data_size = data_meta->tx.plen;
+    return ev;
+}
+
+static __always_inline struct app_timer_event parse_req_to_timer_event(struct meta_info *data_meta) {
+    struct app_timer_event ev;
+    ev.type = TIMER_EVENT;
+    return ev;
+}
+
+static __always_inline struct net_event parse_pkt_to_event(struct tcphdr *tcph, struct iphdr *iph, struct tcp_timestamp_opt *ts_opt) {
+    struct net_event ev;
+    // 1 == NET_EVENT_ACK, 0 == NET_EVENT_DATA
+    ev.minor_type = tcph->ack;
+    ev.ack_seq = bpf_ntohl(tcph->ack_seq);
+    ev.rwnd_size = bpf_ntohs(tcph->window);
+    ev.seq_num = bpf_ntohl(tcph->seq);
+    ev.data_len = bpf_ntohs(iph->tot_len) - (sizeof(struct iphdr) + sizeof(struct tcphdr) + TS_OPT_SIZE);
+    ev.ecn_mark = tcph->ece;
+    ev.ts_ecr = bpf_ntohl(ts_opt->ts_ecr);
+    return ev;
 }
 
 static __always_inline void send_ep (struct app_timer_event *ev, struct bpf_tcp_conn *c,
@@ -76,13 +142,6 @@ static __always_inline void send_ep (struct app_timer_event *ev, struct bpf_tcp_
     cc->txp = c->tx_next_seq != c->send_una;
 
     // TODO: add functions to initialize timers
-}
-
-static __always_inline struct app_timer_event parse_req_to_app_event(struct meta_info *data_meta) {
-    struct app_timer_event ev;
-    ev.type = APP_EVENT;
-    ev.data_size = data_meta->tx.plen;
-    return ev;
 }
 
 static __always_inline int ack_timeout_xdp_ep (struct app_timer_event *ev, struct bpf_tcp_conn *c,
@@ -125,41 +184,18 @@ static __always_inline int ack_timeout_xdp_ep (struct app_timer_event *ev, struc
     // one the arguments. So, how can we get the go_back_bytes to
     // get tx_next_pos?
     // (This whole thing is a problem because we want to abstract tx_next_pos)
-    if (c->tx_next_pos >= go_back_bytes) {
-        c->tx_next_pos -= go_back_bytes;
-    } else {
-        c->tx_next_pos = c->tx_buf_size - (go_back_bytes - c->tx_next_pos);
-    }
-    data_meta->rx.go_back_pos = c->tx_next_pos;
-    // prepare to redirect to userspace
-    data_meta->rx.qid = POISON_32;
-    data_meta->rx.conn = c->opaque_connection;
-    data_meta->rx.rx_pos = POISON_32;
-    data_meta->rx.poff = POISON_16;
-    data_meta->rx.plen = POISON_16;
-    data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
-    data_meta->rx.go_back_pos |= RECOVERY_MASK;
-    data_meta->rx.ooo_bump = POISON_32;
+
+    // Question:
+    // Can we simply ignore pkt_bp when it is generated for retransmission?
+    // In the end, the userspace won't use it in any way and a pkt_bp will be
+    // generated when it regenerates the packet
+
+    // Question:
+    // I would like to have this function that wraps the code that eTran uses
+    // for packet retransmission and translate from a pkt_gen_instr.
+    // But would the compiler be able to know it is for a retransmission?
+    mtp_pkt_gen_for_retransmission(c, go_back_bytes, TIMER_EVENT, data_meta);
     return XDP_PASS; // redirect to userspace
-}
-
-static __always_inline struct app_timer_event parse_req_to_timer_event(struct meta_info *data_meta) {
-    struct app_timer_event ev;
-    ev.type = TIMER_EVENT;
-    return ev;
-}
-
-static __always_inline struct net_event parse_pkt_to_event(struct tcphdr *tcph, struct iphdr *iph, struct tcp_timestamp_opt *ts_opt) {
-    struct net_event ev;
-    // 1 == NET_EVENT_ACK, 0 == NET_EVENT_DATA
-    ev.minor_type = tcph->ack;
-    ev.ack_seq = bpf_ntohl(tcph->ack_seq);
-    ev.rwnd_size = bpf_ntohs(tcph->window);
-    ev.seq_num = bpf_ntohl(tcph->seq);
-    ev.data_len = bpf_ntohs(iph->tot_len) - (sizeof(struct iphdr) + sizeof(struct tcphdr) + TS_OPT_SIZE);
-    ev.ecn_mark = tcph->ece;
-    ev.ts_ecr = bpf_ntohl(ts_opt->ts_ecr);
-    return ev;
 }
 
 // TODO: remove this tx_nump after the ACK chain is done
@@ -241,20 +277,10 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
         int_out->drop = 0;
         c->rx_dupack_cnt = 0;
 
-        if (c->tx_next_pos >= int_out->go_back_bytes) {
-            c->tx_next_pos -= int_out->go_back_bytes;
-        } else {
-            c->tx_next_pos = c->tx_buf_size - (int_out->go_back_bytes - c->tx_next_pos);
-        }
         // Question IMPORTANT:
         // Similar to the problem before, here we also specify the go_back_pos,
         // but in MTP we give send_una
-        data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
-        data_meta->rx.go_back_pos = c->tx_next_pos;
-        data_meta->rx.go_back_pos |= RECOVERY_MASK;
-        data_meta->rx.rx_pos = POISON_32;
-        data_meta->rx.poff = POISON_16;
-        data_meta->rx.plen = POISON_16;
+        mtp_pkt_gen_for_retransmission(c, int_out->go_back_bytes, NET_EVENT, data_meta);
         return;
     }
 
@@ -279,9 +305,7 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
     
     /*__u32 data_rest = c->data_end - c->tx_next_seq;
     if(data_rest == 0 && ev->ack_seq == c->tx_next_seq) {
-        // Question: here we should have a function call to cancel the timer.
-        // Probably set a boolean that is mmapped to control path, saying that the timer is cancelled
-        // TODO: add cancel timer functions
+        // TODO: add cancel timer functions?
         return;
     }*/
 
@@ -289,14 +313,12 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
     if(rmlen > 0) {
         c->send_una = ev->ack_seq;
     }
-    if(rmlen > 0 || xsk_budget_avail(c)) {
-        int_out->drop = 0;
-        data_meta->rx.ack_bytes = rmlen;
-        data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
-        data_meta->rx.rx_pos = POISON_32;
-        data_meta->rx.poff = POISON_16;
-        data_meta->rx.plen = POISON_16;
-    }
+    // Question IMPORTANT:
+    // Is it okay to assume that tx_data_flush can be converted
+    // into the code that notifies ACKs to the app?
+    // The problem is that eTran also does that in case xsk_budget_avail(c)
+    mtp_tx_data_flush(c, int_out, rmlen, data_meta);
+
     // TODO: add timer instruction to restart the timeout timer
 }
 
@@ -404,15 +426,6 @@ static __always_inline __u32 trim_and_handle_ooo(__u32 seq, __u32 *payload_len, 
 
 static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
     __u32 cpu, struct bpf_cc *cc) {
-
-    // Maybe remove this one if we simply use eTran's solution
-    /*if((c->rx_avail == 0 && ev->data_len > 0) ||
-       (ev->seq_num > c->recv_next + c->rx_avail) ||
-       (ev->seq_num + ev->data_len - 1 < c->recv_next)) {
-        // Question: the eBPF verifier announces an error if this print isn't here???????
-        bpf_printk("What the hell");
-        return;
-    }*/
 
     bool clear_ooo = false;
     __u32 rx_bump = trim_and_handle_ooo(ev->seq_num, &ev->data_len, c, data_meta, int_out, &clear_ooo);
