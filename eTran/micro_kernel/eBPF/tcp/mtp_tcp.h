@@ -205,56 +205,32 @@ static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tc
     if(int_out->num_acked_bytes) {
         c->rx_dupack_cnt = 0;
     }
-    // Question: the way they do this check is a bit different.
-    // It seems that they get the number of bytes acknowledged in the ack, and enter the condition if it's zero
-    // Should we do the same?
-    else if(c->tx_next_seq - c->send_una && ev->data_len == 0 && (c->rx_remote_avail == (ev->rwnd_size << TCP_WND_SCALE)) && ++c->rx_dupack_cnt == 3) {
+    else if((c->rx_remote_avail == (ev->rwnd_size << TCP_WND_SCALE)) && ++c->rx_dupack_cnt == 3) {
         int_out->change_cwnd = 0;
-        //c->rx_dupack_cnt += 1;
-        //if(c->rx_dupack_cnt == 3) {
-            // TODO: comment this one later after ack_net_ep is done (we only zero rx_dupack_cnt there in MTP)
-            //c->rx_dupack_cnt = 0;
 
-            go_back_bytes = c->tx_next_seq - c->send_una;
+        go_back_bytes = c->tx_next_seq - c->send_una;
 
-            c->tx_next_seq -= go_back_bytes;
+        c->tx_next_seq -= go_back_bytes;
 
-            // TODO: move this to inside ack_net_ep and make this function copy go_back_bytes to int_out
-            if (c->tx_next_pos >= go_back_bytes) {
-                c->tx_next_pos -= go_back_bytes;
-            } else {
-                __u32 x = (go_back_bytes - c->tx_next_pos);
-                c->tx_next_pos = c->tx_buf_size - x;
-            }
+        // Question: this section of code isn't covered in MTP (is used by the other parts of the code)
+        // If everything works out by adding our EPs, we can remove this part safely
+        //c->tx_pending = 0;
+        c->rx_remote_avail += go_back_bytes;
+        cc->txp = 0;
 
-            // Question: this section of code isn't covered in MTP (is used by the other parts of the code)
-            // If everything works out by adding our EPs, we can remove this part safely
-            //c->tx_pending = 0;
-            c->rx_remote_avail += go_back_bytes;
-            cc->txp = 0;
+        c->data_end -= go_back_bytes;
 
-            c->data_end -= go_back_bytes;
+        if(cc->cnt_tx_drops == 0) {
+            cc->rate >>= 1;
+        }
 
-            // Question: in eTran they don't decrease the DCTCP window both in fast retransmission and timeout.
-            // They confirmed it is a bug.
-            // Should we decrease the window here? But by how much, considering that the rate is cut by half
-            // in their implementation?
-            // But window will need to be shared with userspace too
-            if(cc->cnt_tx_drops == 0) {
-                cc->rate >>= 1;
-                //cc->cwnd_size >>= 1;
-            }
+        cc->cnt_tx_drops++;
+        // Question IMPORTANT: in MTP we would have a set_rate function here.
+        // But this rate would only be used in XDP_EGRESS and enqueueing the packets to the timing wheel
+        // Can we consider the compiler would simply ignore the function?
+    }
 
-            cc->cnt_tx_drops++;
-            // Question: in MTP we would have a set_rate function here.
-            // But this rate would only be used in XDP_EGRESS and enqueueing the packets to the timing wheel
-            // Can we consider the compiler would simply ignore the function?
-    } /*else {
-        c->rx_dupack_cnt = 0;
-        c->last_ack = ev->ack_seq;
-    }*/
-
-    int_out->go_back_pos = c->tx_next_pos;
+    int_out->go_back_bytes = go_back_bytes;
     //c->send_una = ev->ack_seq;
 }
 
@@ -264,15 +240,17 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
     if(c->rx_dupack_cnt == 3) {
         int_out->drop = 0;
         c->rx_dupack_cnt = 0;
-        // Question: this part is quite weird.
-        // To notify the userspace to retransmit the packets (with go-back-N), eTran simply
-        // marks the ACK packet with this flag and specify the position to go back (essentially send_una).
-        // But how would the compiler be able to convert that whole pkt_bp creation,
-        // pkt_gen_instr, and so on, into this?
-        // The main problem is that none of the arguments of unseg_data match with a
-        // go_back_pos value, which is the only relevant value to send back to userspace.
+
+        if (c->tx_next_pos >= int_out->go_back_bytes) {
+            c->tx_next_pos -= int_out->go_back_bytes;
+        } else {
+            c->tx_next_pos = c->tx_buf_size - (int_out->go_back_bytes - c->tx_next_pos);
+        }
+        // Question IMPORTANT:
+        // Similar to the problem before, here we also specify the go_back_pos,
+        // but in MTP we give send_una
         data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
-        data_meta->rx.go_back_pos = int_out->go_back_pos;
+        data_meta->rx.go_back_pos = c->tx_next_pos;
         data_meta->rx.go_back_pos |= RECOVERY_MASK;
         data_meta->rx.rx_pos = POISON_32;
         data_meta->rx.poff = POISON_16;
