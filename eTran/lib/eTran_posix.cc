@@ -2,6 +2,7 @@
 #include "eTran_common.h"
 #include "tcp_if.h"
 #include "xsk_if.h"
+#include "funcs_mtp.h"
 #include <eTran_posix.h>
 
 #include <unistd.h>
@@ -265,6 +266,8 @@ static inline void handle_rx(struct app_ctx_per_thread *tctx, struct eTrantcp_co
         thread_bcache_prod(bc, addr);
         goto out;
     }
+
+    parse_packet(pkt);
 
     if (ooo_bump != POISON_32)
     {

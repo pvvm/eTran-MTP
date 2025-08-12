@@ -3,6 +3,9 @@
 #include <stdlib.h>
 #include "common_funcs.h"
 
+// TODO: fix bug when there's a bpf_printk
+// Probably some error related to the lower rate of transmitting packets
+
 // Fill TCP header excpet for ports
 static __always_inline void mtp_fill_tcp_hdr(struct tcphdr *tcph, struct bpf_tcp_conn *c, void *data_end, __u16 flags,
     struct TCPBP *bp)
@@ -70,6 +73,37 @@ static __always_inline void mtp_pkt_gen_for_retransmission(struct bpf_tcp_conn *
     } else if(ev_type == NET_EVENT) {
         data_meta->rx.go_back_pos |= RECOVERY_MASK;
     }
+}
+
+static __always_inline void mtp_pkt_gen_for_xdp_gen(struct TCPBP *bp, struct bpf_tcp_conn *c,  __u32 cpu) {
+    struct bpf_tcp_ack *ack = NULL;
+    __u32 prod = ack_prod[cpu];
+    __u32 cons = ack_cons[cpu];
+
+    // check if ack queue is full
+    if (unlikely(cons == ((prod + 1) & (NAPI_BATCH_SIZE - 1)))) {
+        xdp_log_err("ack queue is full");
+    } else {
+        ack = bpf_map_lookup_elem(&bpf_tcp_ack_map, &prod);
+        if (unlikely(!ack)) {
+            xdp_log_err("ack is NULL");
+            return;
+        }
+    }
+
+    ack->local_ip = c->local_ip;
+    ack->remote_ip = c->remote_ip;
+    ack->local_port = bp->src_port;
+    ack->remote_port = bp->dest_port;
+    ack->seq = bp->seq_num;
+    ack->ack = bp->ack_seq;
+    ack->rxwnd = bp->rwnd_size;
+    ack->is_ack = bp->is_ack;
+    ack->ts_val = bp->ts_opt.desired_tx_ts;
+    ack->ts_ecr = c->tx_next_ts;
+    c->tx_next_ts = 0;
+
+    ack_prod[cpu] = (ack_prod[cpu] + 1) & (NAPI_BATCH_SIZE - 1);
 }
 
 static __always_inline void mtp_tx_data_flush(struct bpf_tcp_conn *c, struct interm_out *int_out,
@@ -319,12 +353,23 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
     // The problem is that eTran also does that in case xsk_budget_avail(c)
     mtp_tx_data_flush(c, int_out, rmlen, data_meta);
 
+    // Question IMPORTANT:
+    // This question is about the MTP program.
+    // At the end of the CC/rate/timeout chain, we'll restart the timer.
+    // But where do we start the timer and instantiate the timer event?
+    
     // TODO: add timer instruction to restart the timeout timer
 }
 
 static __always_inline __u32 trim_and_handle_ooo(__u32 seq, __u32 *payload_len, struct bpf_tcp_conn *c, struct meta_info *data_meta, struct interm_out *int_out, bool *clear_ooo) {
     __u32 rx_bump = 0;
     __u32 trim_start, trim_end;
+
+    // Question VERY IMPORTANT:
+    // It seems that trimming is quite important for the userspace to work
+    // properly. Is there a way to abstract this concept from MTP, without
+    // having to do it by hand in the MTP implementation?
+    // It would be great, so userspace side of eTran doesn't change that much
     int_out->trigger_ack = true;
     if (unlikely(tcp_valid_rxseq_ooo(c, seq, *payload_len, &trim_start, &trim_end))) {
         int_out->trigger_ack = false;
@@ -457,37 +502,6 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
             data_meta->rx.ooo_bump |= rx_bump;
         }
     }
-}
-
-static __always_inline void mtp_pkt_gen_for_xdp_gen(struct TCPBP *bp, struct bpf_tcp_conn *c,  __u32 cpu) {
-    struct bpf_tcp_ack *ack = NULL;
-    __u32 prod = ack_prod[cpu];
-    __u32 cons = ack_cons[cpu];
-
-    // check if ack queue is full
-    if (unlikely(cons == ((prod + 1) & (NAPI_BATCH_SIZE - 1)))) {
-        xdp_log_err("ack queue is full");
-    } else {
-        ack = bpf_map_lookup_elem(&bpf_tcp_ack_map, &prod);
-        if (unlikely(!ack)) {
-            xdp_log_err("ack is NULL");
-            return;
-        }
-    }
-
-    ack->local_ip = c->local_ip;
-    ack->remote_ip = c->remote_ip;
-    ack->local_port = bp->src_port;
-    ack->remote_port = bp->dest_port;
-    ack->seq = bp->seq_num;
-    ack->ack = bp->ack_seq;
-    ack->rxwnd = bp->rwnd_size;
-    ack->is_ack = bp->is_ack;
-    ack->ts_val = bp->ts_opt.desired_tx_ts;
-    ack->ts_ecr = c->tx_next_ts;
-    c->tx_next_ts = 0;
-
-    ack_prod[cpu] = (ack_prod[cpu] + 1) & (NAPI_BATCH_SIZE - 1);
 }
 
 static __always_inline void send_ack(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,

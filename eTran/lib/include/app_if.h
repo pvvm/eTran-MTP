@@ -181,6 +181,9 @@ struct app_ctx_per_thread {
 
     // connections that need to retransmit
     std::list<std::pair<struct eTrantcp_connection *, uint32_t> > retransmission_conns;
+
+    /* Values added in MTP */
+    unsigned int curr_rx_seq;
 };
 
 // application context in application
