@@ -267,7 +267,7 @@ static inline void handle_rx(struct app_ctx_per_thread *tctx, struct eTrantcp_co
         goto out;
     }
 
-    parse_packet(pkt);
+    //parse_packet(pkt);
 
     if (ooo_bump != POISON_32)
     {

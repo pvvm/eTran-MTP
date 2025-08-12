@@ -42,6 +42,7 @@ static __always_inline void mtp_pkt_gen_for_xdp_egress(struct TCPBP bp, struct b
     struct tcphdr *tcph, struct iphdr *iph, void *data_end, __u32 data_size) {
 
     // Note: here, I consider that pkt_gen_instr will also abstract the increase of tx_next_pos
+    c->buf_curr_seq += data_size;
     c->tx_next_pos += data_size;
     if (c->tx_next_pos >= c->tx_buf_size)
         c->tx_next_pos -= c->tx_buf_size;
@@ -49,10 +50,12 @@ static __always_inline void mtp_pkt_gen_for_xdp_egress(struct TCPBP bp, struct b
     fill_ip_hdr(iph, data_size, c->ecn_enable);
 }
 
-static __always_inline void mtp_pkt_gen_for_retransmission(struct bpf_tcp_conn *c, __u32 go_back_bytes,
+static __always_inline void mtp_pkt_gen_for_retransmission(struct bpf_tcp_conn *c, __u32 send_una,
     __u8 ev_type, struct meta_info *data_meta) {
 
     // Note: here, I consider that pkt_gen_instr will also abstract the increase of tx_next_pos
+    __u32 go_back_bytes = c->buf_curr_seq - send_una;
+    c->buf_curr_seq -= go_back_bytes;
     if (c->tx_next_pos >= go_back_bytes) {
         c->tx_next_pos -= go_back_bytes;
     } else {
@@ -218,17 +221,20 @@ static __always_inline int ack_timeout_xdp_ep (struct app_timer_event *ev, struc
     // one the arguments. So, how can we get the go_back_bytes to
     // get tx_next_pos?
     // (This whole thing is a problem because we want to abstract tx_next_pos)
+    // A: photo
 
     // Question:
     // Can we simply ignore pkt_bp when it is generated for retransmission?
     // In the end, the userspace won't use it in any way and a pkt_bp will be
     // generated when it regenerates the packet
+    // A: ignore for now
 
     // Question:
     // I would like to have this function that wraps the code that eTran uses
     // for packet retransmission and translate from a pkt_gen_instr.
     // But would the compiler be able to know it is for a retransmission?
-    mtp_pkt_gen_for_retransmission(c, go_back_bytes, TIMER_EVENT, data_meta);
+    // A: have a single wrapper and use buf_cur_seq for the decision and see if it is alligned
+    mtp_pkt_gen_for_retransmission(c, c->send_una, TIMER_EVENT, data_meta);
     return XDP_PASS; // redirect to userspace
 }
 
@@ -300,7 +306,7 @@ static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tc
         // Can we consider the compiler would simply ignore the function?
     }
 
-    int_out->go_back_bytes = go_back_bytes;
+    //int_out->go_back_bytes = go_back_bytes;
     //c->send_una = ev->ack_seq;
 }
 
@@ -314,7 +320,7 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
         // Question IMPORTANT:
         // Similar to the problem before, here we also specify the go_back_pos,
         // but in MTP we give send_una
-        mtp_pkt_gen_for_retransmission(c, int_out->go_back_bytes, NET_EVENT, data_meta);
+        mtp_pkt_gen_for_retransmission(c, c->send_una, NET_EVENT, data_meta);
         return;
     }
 

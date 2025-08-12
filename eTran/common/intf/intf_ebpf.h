@@ -207,6 +207,7 @@ struct bpf_tcp_conn {
     __u32 send_una;
     __u32 data_end;
     __u32 recv_next;
+    __u32 buf_curr_seq;
 
     // used by XDP_REDIRECT
     // this value is updated when application calls open() or accept()

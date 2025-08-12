@@ -523,6 +523,7 @@ static int reg_tcp_conn_ebpf(struct tcp_connection *c, bool listen)
     ebpf_c.send_una = listen ? c->local_seq + 1 : c->local_seq;
     ebpf_c.data_end = 0;
     ebpf_c.recv_next = c->remote_seq;
+    ebpf_c.buf_curr_seq = listen ? c->local_seq + 1 : c->local_seq;
 
     for (unsigned int i = 0; i < c->tctx->actx->nr_nic_queues; i++)
     {
