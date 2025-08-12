@@ -38,43 +38,41 @@ static __always_inline void mtp_fill_tcp_hdr(struct tcphdr *tcph, struct bpf_tcp
     tcph->check = 0;
 }
 
-static __always_inline void mtp_pkt_gen_for_xdp_egress(struct TCPBP bp, struct bpf_tcp_conn *c,
-    struct tcphdr *tcph, struct iphdr *iph, void *data_end, __u32 data_size) {
-
-    // Note: here, I consider that pkt_gen_instr will also abstract the increase of tx_next_pos
-    c->buf_curr_seq += data_size;
-    c->tx_next_pos += data_size;
-    if (c->tx_next_pos >= c->tx_buf_size)
-        c->tx_next_pos -= c->tx_buf_size;
-    mtp_fill_tcp_hdr(tcph, c, data_end, 0, &bp);
-    fill_ip_hdr(iph, data_size, c->ecn_enable);
-}
-
-static __always_inline void mtp_pkt_gen_for_retransmission(struct bpf_tcp_conn *c, __u32 send_una,
+static __always_inline void mtp_pkt_gen_wrapper(bool seg_unseg, struct TCPBP bp, struct bpf_tcp_conn *c,
+    struct tcphdr *tcph, struct iphdr *iph, void *data_end, __u32 data_size, __u32 seq_num,
     __u8 ev_type, struct meta_info *data_meta) {
 
-    // Note: here, I consider that pkt_gen_instr will also abstract the increase of tx_next_pos
-    __u32 go_back_bytes = c->buf_curr_seq - send_una;
-    c->buf_curr_seq -= go_back_bytes;
-    if (c->tx_next_pos >= go_back_bytes) {
-        c->tx_next_pos -= go_back_bytes;
+    if(seg_unseg == SEG_DATA || (c->buf_curr_seq < seq_num)) {
+        c->buf_curr_seq += data_size;
+        c->tx_next_pos += data_size;
+        if (c->tx_next_pos >= c->tx_buf_size)
+            c->tx_next_pos -= c->tx_buf_size;
+        mtp_fill_tcp_hdr(tcph, c, data_end, 0, &bp);
+        fill_ip_hdr(iph, data_size, c->ecn_enable);
+
     } else {
-        c->tx_next_pos = c->tx_buf_size - (go_back_bytes - c->tx_next_pos);
-    }
-
-    data_meta->rx.go_back_pos = c->tx_next_pos;
-    data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
-    data_meta->rx.rx_pos = POISON_32;
-    data_meta->rx.poff = POISON_16;
-    data_meta->rx.plen = POISON_16;
-
-    if(ev_type == TIMER_EVENT) {
-        data_meta->rx.qid = POISON_32;
-        data_meta->rx.conn = c->opaque_connection;
-        data_meta->rx.go_back_pos |= RECOVERY_MASK;
-        data_meta->rx.ooo_bump = POISON_32;
-    } else if(ev_type == NET_EVENT) {
-        data_meta->rx.go_back_pos |= RECOVERY_MASK;
+        __u32 go_back_bytes = c->buf_curr_seq - seq_num;
+        c->buf_curr_seq -= go_back_bytes;
+        if (c->tx_next_pos >= go_back_bytes) {
+            c->tx_next_pos -= go_back_bytes;
+        } else {
+            c->tx_next_pos = c->tx_buf_size - (go_back_bytes - c->tx_next_pos);
+        }
+    
+        data_meta->rx.go_back_pos = c->tx_next_pos;
+        data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
+        data_meta->rx.rx_pos = POISON_32;
+        data_meta->rx.poff = POISON_16;
+        data_meta->rx.plen = POISON_16;
+    
+        if(ev_type == TIMER_EVENT) {
+            data_meta->rx.qid = POISON_32;
+            data_meta->rx.conn = c->opaque_connection;
+            data_meta->rx.go_back_pos |= RECOVERY_MASK;
+            data_meta->rx.ooo_bump = POISON_32;
+        } else if(ev_type == NET_EVENT) {
+            data_meta->rx.go_back_pos |= RECOVERY_MASK;
+        }
     }
 }
 
@@ -172,7 +170,7 @@ static __always_inline void send_ep (struct app_timer_event *ev, struct bpf_tcp_
 
     // Note: I am abstracting the seg_data and pkt_gen_instr in this function.
     // The 5th argument is the second argument of seg_data (the length)
-    mtp_pkt_gen_for_xdp_egress(bp, c, tcph, iph, data_end, ev->data_size);
+    mtp_pkt_gen_wrapper(SEG_DATA, bp, c, tcph, iph, data_end, ev->data_size, 0, 0, data_meta);
 
     c->tx_next_seq += ev->data_size;
 
@@ -234,7 +232,8 @@ static __always_inline int ack_timeout_xdp_ep (struct app_timer_event *ev, struc
     // for packet retransmission and translate from a pkt_gen_instr.
     // But would the compiler be able to know it is for a retransmission?
     // A: have a single wrapper and use buf_cur_seq for the decision and see if it is alligned
-    mtp_pkt_gen_for_retransmission(c, c->send_una, TIMER_EVENT, data_meta);
+    struct TCPBP bp = {0};
+    mtp_pkt_gen_wrapper(UNSEG_DATA, bp, c, NULL, NULL, NULL, 0, c->send_una, TIMER_EVENT, data_meta);
     return XDP_PASS; // redirect to userspace
 }
 
@@ -320,7 +319,9 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
         // Question IMPORTANT:
         // Similar to the problem before, here we also specify the go_back_pos,
         // but in MTP we give send_una
-        mtp_pkt_gen_for_retransmission(c, c->send_una, NET_EVENT, data_meta);
+        struct TCPBP bp = {0};
+        mtp_pkt_gen_wrapper(UNSEG_DATA, bp, c, NULL, NULL, NULL, 0, c->send_una, NET_EVENT, data_meta);
+
         return;
     }
 
@@ -490,9 +491,10 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
     // and first_unset method can be translated to simply copying this value?
     c->recv_next = c->rx_next_seq;
 
-    // Question: I wonder if add_data_seg could be translated the section below.
-    // ev.data_len would be converted to payload_len and the rest wouldn't
-    // matter or data_meta would be filled already in the function above (like the offset (last arg) and rx.poff)
+    // Question IMPORTANT:
+    // add_data_seg would be kind of equivalent to this part here.
+    
+    ev.hold_addr, ev.data_len, get_flow_id(ev), ev.seq_num - ctx.recv_init_seq
     if(rx_bump || clear_ooo || xsk_budget_avail(c)) {
         int_out->drop = 0;
         data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);

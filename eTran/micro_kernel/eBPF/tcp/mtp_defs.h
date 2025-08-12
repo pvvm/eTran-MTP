@@ -11,6 +11,9 @@
 #define APP_EVENT 1
 #define TIMER_EVENT 0
 
+#define SEG_DATA 1
+#define UNSEG_DATA 0
+
 struct ts_option {
     __u32 desired_tx_ts;
 };
