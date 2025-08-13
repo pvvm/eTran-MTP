@@ -493,8 +493,6 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
 
     // Question IMPORTANT:
     // add_data_seg would be kind of equivalent to this part here.
-    
-    ev.hold_addr, ev.data_len, get_flow_id(ev), ev.seq_num - ctx.recv_init_seq
     if(rx_bump || clear_ooo || xsk_budget_avail(c)) {
         int_out->drop = 0;
         data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);

@@ -267,7 +267,11 @@ static inline void handle_rx(struct app_ctx_per_thread *tctx, struct eTrantcp_co
         goto out;
     }
 
-    //parse_packet(pkt);
+    #ifdef MTP_ON
+    unsigned int start_seq, end_seq;
+    parse_packet(pkt, &start_seq, &end_seq, py_len);
+    mtp_add_data_seg_wrapper(tctx, pkt, start_seq, end_seq, py_len, conn, addr, cached_rx_bump);
+    #else
 
     if (ooo_bump != POISON_32)
     {
@@ -298,6 +302,7 @@ static inline void handle_rx(struct app_ctx_per_thread *tctx, struct eTrantcp_co
         in_order_receive(conn, addr, pkt);
         // printf("in_order_receive: rx_bump = %ld\n", *cached_rx_bump);
     }
+    #endif
 
 out:
     if (unlikely(last)) {
