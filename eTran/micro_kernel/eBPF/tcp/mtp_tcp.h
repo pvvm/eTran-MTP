@@ -142,6 +142,7 @@ static __always_inline void parse_pkt_to_event(struct net_event *ev, struct tcph
     ev->data_len = bpf_ntohs(iph->tot_len) - (sizeof(struct iphdr) + sizeof(struct tcphdr) + TS_OPT_SIZE);
     ev->ecn_mark = tcph->ece;
     ev->ts_ecr = bpf_ntohl(ts_opt->ts_ecr);
+    ev->ts_val = bpf_ntohl(ts_opt->ts_val);
 }
 
 static __always_inline void send_ep (struct app_timer_event *ev, struct bpf_tcp_conn *c,
@@ -465,44 +466,47 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
         /* update TCP receive window */
         c->rx_remote_avail = ev->rwnd_size << TCP_WND_SCALE;
     }
+    /* update RTT estimate */
+    if (ev->data_len && !c->tx_next_ts)
+        c->tx_next_ts = ev->ts_val;
 
     /* check if we can add it to the out of order interval */
 
         /* update TCP state if we have payload */
-        if (likely(ev->data_len)) {
-            rx_bump = ev->data_len;
-            c->rx_avail -= ev->data_len;
-            c->rx_next_pos += ev->data_len;
-            if (c->rx_next_pos >= c->rx_buf_size)
-                c->rx_next_pos -= c->rx_buf_size;
-            c->rx_next_seq += ev->data_len;
+    if (likely(ev->data_len)) {
+        rx_bump = ev->data_len;
+        c->rx_avail -= ev->data_len;
+        c->rx_next_pos += ev->data_len;
+        if (c->rx_next_pos >= c->rx_buf_size)
+            c->rx_next_pos -= c->rx_buf_size;
+        c->rx_next_seq += ev->data_len;
 
-            /* handle existing out-of-order segments */
-            if (unlikely(c->rx_ooo_len)) {
-                if (!tcp_valid_rxseq_ooo(c, c->rx_ooo_start, c->rx_ooo_len, &trim_start, &trim_end)) {
-                    c->rx_ooo_start += trim_start;
-                    c->rx_ooo_len -= trim_start + trim_end;
+        /* handle existing out-of-order segments */
+        if (unlikely(c->rx_ooo_len)) {
+            if (!tcp_valid_rxseq_ooo(c, c->rx_ooo_start, c->rx_ooo_len, &trim_start, &trim_end)) {
+                c->rx_ooo_start += trim_start;
+                c->rx_ooo_len -= trim_start + trim_end;
 
-                    // accept out-of-order segments
-                    if (c->rx_ooo_len && c->rx_ooo_start == c->rx_next_seq) {
-                        rx_bump += c->rx_ooo_len;
-                        c->rx_avail -= c->rx_ooo_len;
-                        c->rx_next_pos += c->rx_ooo_len;
-                        if (c->rx_next_pos >= c->rx_buf_size)
-                            c->rx_next_pos -= c->rx_buf_size;
-                        c->rx_next_seq += c->rx_ooo_len;
+                // accept out-of-order segments
+                if (c->rx_ooo_len && c->rx_ooo_start == c->rx_next_seq) {
+                    rx_bump += c->rx_ooo_len;
+                    c->rx_avail -= c->rx_ooo_len;
+                    c->rx_next_pos += c->rx_ooo_len;
+                    if (c->rx_next_pos >= c->rx_buf_size)
+                        c->rx_next_pos -= c->rx_buf_size;
+                    c->rx_next_seq += c->rx_ooo_len;
 
-                        c->rx_ooo_len = 0;
-                        // out-of-order segment is processed
-                        //data_meta->rx.ooo_bump = OOO_FIN_MASK;
-                    }
+                    c->rx_ooo_len = 0;
+                    // out-of-order segment is processed
+                    //data_meta->rx.ooo_bump = OOO_FIN_MASK;
                 }
             }
-
-            if (unlikely((c->rx_avail >> TCP_WND_SCALE) == 0)) {
-                data_meta->rx.qid |= FORCE_RX_BUMP_MASK;
-            }
         }
+
+        if (unlikely((c->rx_avail >> TCP_WND_SCALE) == 0)) {
+            data_meta->rx.qid |= FORCE_RX_BUMP_MASK;
+        }
+    }
 
 
    

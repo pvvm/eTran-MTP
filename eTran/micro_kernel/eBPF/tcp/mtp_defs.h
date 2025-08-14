@@ -58,6 +58,7 @@ struct net_event {
     // DATA
     // Question: how are we representing hold_addr?
     __u32 data_len;
+    __u32 ts_val;
 
     // SHARED
     __u32 seq_num;

@@ -551,9 +551,9 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
     struct net_event *ev)
 {
     bool drop = true;
+    #ifndef MTP_ON
     struct tcp_timestamp_opt *ts_opt = (struct tcp_timestamp_opt *)(tcph + 1);
     __u32 ts_val = bpf_ntohl(ts_opt->ts_val);
-    #ifndef MTP_ON
     __u32 payload_off = sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct tcphdr) + TS_OPT_SIZE;
     __u32 payload_len = pkt_len - payload_off;
     __u32 ts_ecr = bpf_ntohl(ts_opt->ts_ecr);
@@ -628,9 +628,6 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
         verify_trim_data_ep(ev, c, &int_out, data_meta, cpu, cc);
         ooo_data_net_ep(ev, c, &int_out, data_meta, cpu, cc);
         data_net_ep(ev, c, &int_out, data_meta, cpu, cc);
-        /* update RTT estimate */
-        if (ev->data_len && !c->tx_next_ts)
-            c->tx_next_ts = ts_val;
         
         send_ack(ev, c, &int_out, data_meta, cpu, cc);
         
