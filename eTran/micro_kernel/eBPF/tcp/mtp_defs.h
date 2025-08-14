@@ -33,6 +33,7 @@ struct interm_out {
     bool skip_ack_eps;
     bool trigger_ack;
     bool drop;
+    bool skip_data_eps;
     __u32 num_acked_bytes;
     __u32 go_back_bytes;
 };
