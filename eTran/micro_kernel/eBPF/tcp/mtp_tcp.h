@@ -419,7 +419,7 @@ static __always_inline void verify_trim_data_ep(struct net_event *ev, struct bpf
         data_meta->rx.rx_pos -= c->rx_buf_size;*/
 }
 
-static __always_inline void ooo_data_net_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
+static __always_inline void detect_ooo_data_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
     __u32 cpu, struct bpf_cc *cc) {
     
     /*if(int_out->skip_data_eps) {
@@ -450,15 +450,14 @@ static __always_inline void ooo_data_net_ep(struct net_event *ev, struct bpf_tcp
     }
 }
 
-static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
-    __u32 cpu, struct bpf_cc *cc) {
 
+
+static __always_inline void flush_ooo_data_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
+    __u32 cpu, struct bpf_cc *cc) {
+    
     /*if(int_out->skip_data_eps) {
         return;
     }*/
-    bool clear_ooo = false;
-    __u32 rx_bump = 0;
-    
     __u32 trim_start = 0;
     __u32 trim_end = 0;
 
@@ -473,12 +472,8 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
     /* check if we can add it to the out of order interval */
 
         /* update TCP state if we have payload */
-    if (likely(ev->data_len)) {
-        rx_bump = ev->data_len;
+    if (ev->data_len) {
         c->rx_avail -= ev->data_len;
-        c->rx_next_pos += ev->data_len;
-        if (c->rx_next_pos >= c->rx_buf_size)
-            c->rx_next_pos -= c->rx_buf_size;
         c->rx_next_seq += ev->data_len;
 
         /* handle existing out-of-order segments */
@@ -489,13 +484,8 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
 
                 // accept out-of-order segments
                 if (c->rx_ooo_len && c->rx_ooo_start == c->rx_next_seq) {
-                    rx_bump += c->rx_ooo_len;
                     c->rx_avail -= c->rx_ooo_len;
-                    c->rx_next_pos += c->rx_ooo_len;
-                    if (c->rx_next_pos >= c->rx_buf_size)
-                        c->rx_next_pos -= c->rx_buf_size;
                     c->rx_next_seq += c->rx_ooo_len;
-
                     c->rx_ooo_len = 0;
                     // out-of-order segment is processed
                     //data_meta->rx.ooo_bump = OOO_FIN_MASK;
@@ -507,10 +497,12 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
             data_meta->rx.qid |= FORCE_RX_BUMP_MASK;
         }
     }
+}
 
+static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
+    __u32 cpu, struct bpf_cc *cc) {
 
-   
-    if(rx_bump || clear_ooo || xsk_budget_avail(c)) {
+    if(ev->data_len || xsk_budget_avail(c)) {
         int_out->drop = 0;
         data_meta->rx.rx_pos = (ev->seq_num - c->recv_init_seq);
         data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);

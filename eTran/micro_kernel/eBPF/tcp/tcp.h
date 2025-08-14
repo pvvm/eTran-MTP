@@ -290,7 +290,9 @@ static __always_inline int tcp_tx_process(struct iphdr *iph, struct tcphdr *tcph
         return XDP_DROP;
     __u32 rx_bump = data_meta->tx.rx_bump;
     __u32 payload_len = data_meta->tx.plen;
+    #ifndef MTP_ON
     __u32 tx_pending = data_meta->tx.tx_pending;
+    #endif
     __u32 tx_pos = data_meta->tx.tx_pos;
     
     __u64 ref_ts = 0;
@@ -626,7 +628,8 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
         return int_out.drop ? XDP_DROP : XDP_REDIRECT;
     } else if (ev->minor_type == NET_EVENT_DATA) {
         verify_trim_data_ep(ev, c, &int_out, data_meta, cpu, cc);
-        ooo_data_net_ep(ev, c, &int_out, data_meta, cpu, cc);
+        detect_ooo_data_ep(ev, c, &int_out, data_meta, cpu, cc);
+        flush_ooo_data_ep(ev, c, &int_out, data_meta, cpu, cc);
         data_net_ep(ev, c, &int_out, data_meta, cpu, cc);
         
         send_ack(ev, c, &int_out, data_meta, cpu, cc);
