@@ -386,11 +386,11 @@ static __always_inline void verify_trim_data_ep(struct net_event *ev, struct bpf
                     seq_in_range(exp_seq_first, pkt_seq_first, pkt_seq_last, false) ||
                     seq_in_range(exp_seq_last, pkt_seq_first, pkt_seq_last, true);
     
-    /*if (!valid) {
+    if (!valid) {
         int_out->skip_data_eps = true;
         int_out->trigger_ack = false;
         return;
-    }*/
+    }
 
     if (seq_in_range(pkt_seq_first, exp_seq_first, exp_seq_last, false)) {
         trim_start = 0;
@@ -412,6 +412,41 @@ static __always_inline void verify_trim_data_ep(struct net_event *ev, struct bpf
     data_meta->rx.plen = ev->data_len;
 
     ev->seq_num += trim_start;
+
+    /*data_meta->rx.rx_pos = c->rx_next_pos + (ev->seq_num - c->rx_next_seq);
+    if (data_meta->rx.rx_pos >= c->rx_buf_size)
+        data_meta->rx.rx_pos -= c->rx_buf_size;*/
+}
+
+static __always_inline void ooo_data_net_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
+    __u32 cpu, struct bpf_cc *cc) {
+    
+    /*if(int_out->skip_data_eps) {
+        return;
+    }*/
+
+    if ((ev->seq_num != c->rx_next_seq)) {
+        if (!ev->data_len) {
+            int_out->skip_data_eps = true;
+            return;
+        }
+        if (c->rx_ooo_len == 0) {
+            c->rx_ooo_start = ev->seq_num;
+            c->rx_ooo_len = ev->data_len;
+        } else if (ev->seq_num + ev->data_len == c->rx_ooo_start) {
+            c->rx_ooo_start = ev->seq_num;
+            c->rx_ooo_len += ev->data_len;
+        } else if (c->rx_ooo_start + c->rx_ooo_len == ev->seq_num) {
+            c->rx_ooo_len += ev->data_len;
+        } else {
+            // unfortunately, we can't accept this payload
+            ev->data_len = 0;
+            data_meta->rx.plen = POISON_16;
+        }
+        // mark this packet is an out-of-order segment
+        data_meta->rx.ooo_bump = 0;
+        int_out->skip_data_eps = true;
+    }
 }
 
 static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
@@ -422,35 +457,17 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
     }*/
     bool clear_ooo = false;
     __u32 rx_bump = 0;
-    if(!int_out->skip_data_eps) {
     
     __u32 trim_start = 0;
     __u32 trim_end = 0;
 
-    /*data_meta->rx.rx_pos = c->rx_next_pos + (ev->seq_num - c->rx_next_seq);
-    if (data_meta->rx.rx_pos >= c->rx_buf_size)
-        data_meta->rx.rx_pos -= c->rx_buf_size;*/
+    if ((c->rx_remote_avail < ev->rwnd_size << TCP_WND_SCALE)) {
+        /* update TCP receive window */
+        c->rx_remote_avail = ev->rwnd_size << TCP_WND_SCALE;
+    }
 
     /* check if we can add it to the out of order interval */
-    if ((ev->seq_num != c->rx_next_seq)) {
-        if (ev->data_len) {
-            if (c->rx_ooo_len == 0) {
-                c->rx_ooo_start = ev->seq_num;
-                c->rx_ooo_len = ev->data_len;
-            } else if (ev->seq_num + ev->data_len == c->rx_ooo_start) {
-                c->rx_ooo_start = ev->seq_num;
-                c->rx_ooo_len += ev->data_len;
-            } else if (c->rx_ooo_start + c->rx_ooo_len == ev->seq_num) {
-                c->rx_ooo_len += ev->data_len;
-            } else {
-                // unfortunately, we can't accept this payload
-                ev->data_len = 0;
-                data_meta->rx.plen = POISON_16;
-            }
-        }
-        // mark this packet is an out-of-order segment
-        data_meta->rx.ooo_bump = 0;
-    } else {
+
         /* update TCP state if we have payload */
         if (likely(ev->data_len)) {
             rx_bump = ev->data_len;
@@ -487,12 +504,6 @@ static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_con
             }
         }
 
-        if ((c->rx_remote_avail < ev->rwnd_size << TCP_WND_SCALE)) {
-            /* update TCP receive window */
-            c->rx_remote_avail = ev->rwnd_size << TCP_WND_SCALE;
-        }
-    }
-}
 
    
     if(rx_bump || clear_ooo || xsk_budget_avail(c)) {

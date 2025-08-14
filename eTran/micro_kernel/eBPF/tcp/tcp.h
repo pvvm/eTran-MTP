@@ -626,6 +626,7 @@ static __always_inline int tcp_rx_process(struct tcphdr *tcph, struct bpf_tcp_co
         return int_out.drop ? XDP_DROP : XDP_REDIRECT;
     } else if (ev->minor_type == NET_EVENT_DATA) {
         verify_trim_data_ep(ev, c, &int_out, data_meta, cpu, cc);
+        ooo_data_net_ep(ev, c, &int_out, data_meta, cpu, cc);
         data_net_ep(ev, c, &int_out, data_meta, cpu, cc);
         /* update RTT estimate */
         if (ev->data_len && !c->tx_next_ts)
