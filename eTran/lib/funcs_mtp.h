@@ -37,7 +37,6 @@ void mtp_add_data_seg_wrapper(struct app_ctx_per_thread *tctx, char *pkt, unsign
     // If it is the first packet
     if(!tctx->following_packets) {
         *cached_rx_bump += py_len;
-        in_order_receive(conn, addr, pkt);
         tctx->expected_seq = end_seq;
         tctx->following_packets = true;
 
@@ -52,6 +51,7 @@ void mtp_add_data_seg_wrapper(struct app_ctx_per_thread *tctx, char *pkt, unsign
             rx_pos -= tctx->rx_buf_size;
         }
         rxmeta_set_pos(pkt, rx_pos);
+        in_order_receive(conn, addr, pkt);
         //printf("A: %u\n", rx_pos);
     } else {
         // If this packet is in order
@@ -70,6 +70,8 @@ void mtp_add_data_seg_wrapper(struct app_ctx_per_thread *tctx, char *pkt, unsign
                 rxmeta_set_pos(pkt, rx_pos);
                 //printf("B: %u\n", rx_pos);
                 tctx->last_offset = offset;
+
+                // TODO: Think if this is wrong
                 tctx->rx_next_pos += (py_len + tctx->ooo_len);
                 if(tctx->rx_next_pos >= tctx->rx_buf_size) {
                     tctx->rx_next_pos -= tctx->rx_buf_size;
@@ -89,9 +91,10 @@ void mtp_add_data_seg_wrapper(struct app_ctx_per_thread *tctx, char *pkt, unsign
                 }
                 rxmeta_set_pos(pkt, rx_pos);
                 //printf("C: %u\n", rx_pos);
-                tctx->last_offset = offset;
 
-                tctx->rx_next_pos += py_len;
+                // Before, it was tctx->rx_next_pos += py_len (and it was causing a really anoying bug)
+                tctx->rx_next_pos += (offset - tctx->last_offset);
+                tctx->last_offset = offset;
                 if(tctx->rx_next_pos >= tctx->rx_buf_size) {
                     tctx->rx_next_pos -= tctx->rx_buf_size;
                 }
