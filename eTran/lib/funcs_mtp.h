@@ -32,7 +32,8 @@ void parse_packet(char *pkt, unsigned int *start_seq, unsigned int *end_seq, uns
 }
 
 void mtp_add_data_seg_wrapper(struct app_ctx_per_thread *tctx, char *pkt, unsigned int start_seq,
-    unsigned int end_seq, unsigned int py_len, struct eTrantcp_connection *conn, uint64_t addr, size_t *cached_rx_bump) {
+    unsigned int end_seq, unsigned int py_len, struct eTrantcp_connection *conn, uint64_t addr,
+    size_t *cached_rx_bump, uint32_t offset) {
     // If it is the first packet
     if(!tctx->following_packets) {
         *cached_rx_bump += py_len;
@@ -40,6 +41,18 @@ void mtp_add_data_seg_wrapper(struct app_ctx_per_thread *tctx, char *pkt, unsign
         tctx->expected_seq = end_seq;
         tctx->following_packets = true;
 
+        // For now, I'm considering that rx_buf_size will be this constant
+        // Although that can change in parse_mc_args in micro_kernel.cc
+        tctx->rx_buf_size = 524288;
+        tctx->last_offset = offset;
+        // It will always be tctx->rx_next_pos
+        uint32_t rx_pos = tctx->rx_next_pos + (offset - tctx->last_offset);
+        // Just in case
+        if(rx_pos >= tctx->rx_buf_size) {
+            rx_pos -= tctx->rx_buf_size;
+        }
+        rxmeta_set_pos(pkt, rx_pos);
+        //printf("A: %u\n", rx_pos);
     } else {
         // If this packet is in order
         if(tctx->expected_seq == start_seq) {
@@ -49,6 +62,19 @@ void mtp_add_data_seg_wrapper(struct app_ctx_per_thread *tctx, char *pkt, unsign
                 /* append ooo_rx_addrs to the tail of rx_addrs */
                 conn->rx_addrs.insert(conn->rx_addrs.end(), conn->ooo_rx_addrs.begin(), conn->ooo_rx_addrs.end());
                 conn->ooo_rx_addrs.clear();
+
+                uint32_t rx_pos = tctx->rx_next_pos + (offset - tctx->last_offset);
+                if(rx_pos >= tctx->rx_buf_size) {
+                    rx_pos -= tctx->rx_buf_size;
+                }
+                rxmeta_set_pos(pkt, rx_pos);
+                //printf("B: %u\n", rx_pos);
+                tctx->last_offset = offset;
+                tctx->rx_next_pos += (py_len + tctx->ooo_len);
+                if(tctx->rx_next_pos >= tctx->rx_buf_size) {
+                    tctx->rx_next_pos -= tctx->rx_buf_size;
+                }
+
                 in_order_receive(conn, addr, pkt);
                 tctx->expected_seq = tctx->ooo_start + tctx->ooo_len;
                 tctx->ooo_len = 0;
@@ -56,6 +82,20 @@ void mtp_add_data_seg_wrapper(struct app_ctx_per_thread *tctx, char *pkt, unsign
             } else {
                 tctx->expected_seq += py_len;
                 *cached_rx_bump += py_len;
+
+                uint32_t rx_pos = tctx->rx_next_pos + (offset - tctx->last_offset);
+                if(rx_pos >= tctx->rx_buf_size) {
+                    rx_pos -= tctx->rx_buf_size;
+                }
+                rxmeta_set_pos(pkt, rx_pos);
+                //printf("C: %u\n", rx_pos);
+                tctx->last_offset = offset;
+
+                tctx->rx_next_pos += py_len;
+                if(tctx->rx_next_pos >= tctx->rx_buf_size) {
+                    tctx->rx_next_pos -= tctx->rx_buf_size;
+                }
+
                 in_order_receive(conn, addr, pkt);
             }
         
@@ -72,6 +112,15 @@ void mtp_add_data_seg_wrapper(struct app_ctx_per_thread *tctx, char *pkt, unsign
             } else {
                 return;
             }
+
+            uint32_t rx_pos = tctx->rx_next_pos + (offset - tctx->last_offset);
+            if(rx_pos >= tctx->rx_buf_size) {
+                rx_pos -= tctx->rx_buf_size;
+            }
+            rxmeta_set_pos(pkt, rx_pos);
+            //printf("D: %u\n", rx_pos);
+            //tctx->last_offset = offset;
+
             out_of_order_receive(conn, addr, pkt);
         }
     }

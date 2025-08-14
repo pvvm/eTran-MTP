@@ -368,7 +368,12 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
     // TODO: add timer instruction to restart the timeout timer
 }
 
-static __always_inline __u32 trim_and_handle_ooo(__u32 seq, __u32 *payload_len, struct bpf_tcp_conn *c, struct meta_info *data_meta, struct interm_out *int_out, bool *clear_ooo) {
+static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
+    __u32 cpu, struct bpf_cc *cc) {
+
+    bool clear_ooo = false;
+    //__u32 rx_bump = trim_and_handle_ooo(ev->seq_num, &ev->data_len, c, data_meta, int_out, &clear_ooo);
+
     __u32 rx_bump = 0;
     __u32 trim_start, trim_end;
 
@@ -378,113 +383,104 @@ static __always_inline __u32 trim_and_handle_ooo(__u32 seq, __u32 *payload_len, 
     // having to do it by hand in the MTP implementation?
     // It would be great, so userspace side of eTran doesn't change that much
     int_out->trigger_ack = true;
-    if (unlikely(tcp_valid_rxseq_ooo(c, seq, *payload_len, &trim_start, &trim_end))) {
+    if (tcp_valid_rxseq_ooo(c, ev->seq_num, ev->data_len, &trim_start, &trim_end)) {
         int_out->trigger_ack = false;
         //xdp_log_err("Bad seq");
         //goto unlock;
-        return rx_bump;
-    }
-    __u32 payload_off = sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct tcphdr) + TS_OPT_SIZE;
-    payload_off += trim_start;
-    if (likely(*payload_len >= trim_start + trim_end))
-        *payload_len -= trim_start + trim_end;
-    data_meta->rx.poff = payload_off;
-    data_meta->rx.plen = *payload_len;
+    } else {
+        __u32 payload_off = sizeof(struct ethhdr) + sizeof(struct iphdr) + sizeof(struct tcphdr) + TS_OPT_SIZE;
+        payload_off += trim_start;
+        if (likely(ev->data_len >= trim_start + trim_end))
+            ev->data_len -= trim_start + trim_end;
+        data_meta->rx.poff = payload_off;
+        data_meta->rx.plen = ev->data_len;
 
-    seq += trim_start;
-    data_meta->rx.rx_pos = c->rx_next_pos + (seq - c->rx_next_seq);
-    if (data_meta->rx.rx_pos >= c->rx_buf_size)
-        data_meta->rx.rx_pos -= c->rx_buf_size;
+        ev->seq_num += trim_start;
+        /*data_meta->rx.rx_pos = c->rx_next_pos + (ev->seq_num - c->rx_next_seq);
+        if (data_meta->rx.rx_pos >= c->rx_buf_size)
+            data_meta->rx.rx_pos -= c->rx_buf_size;*/
+        data_meta->rx.rx_pos = (ev->seq_num - c->recv_init_seq);
 
-    /* check if we can add it to the out of order interval */
-    if (unlikely(seq != c->rx_next_seq)) {
-        if (!*payload_len) return rx_bump;
-        xdp_log("OOO packet, seq(%u), c->rx_next_seq(%u)", seq, c->rx_next_seq);
-        if (c->rx_ooo_len == 0) {
-            c->rx_ooo_start = seq;
-            c->rx_ooo_len = *payload_len;
-            xdp_log("New segment, ooo_start(%u), ooo_len(%u)", c->rx_ooo_start, c->rx_ooo_len);
-        } else if (seq + *payload_len == c->rx_ooo_start) {
-            c->rx_ooo_start = seq;
-            c->rx_ooo_len += *payload_len;
-            xdp_log("Merge segment, ooo_start(%u), ooo_len(%u)", c->rx_ooo_start, c->rx_ooo_len);
-        } else if (c->rx_ooo_start + c->rx_ooo_len == seq) {
-            c->rx_ooo_len += *payload_len;
-            xdp_log("Merge segment, ooo_start(%u), ooo_len(%u)", c->rx_ooo_start, c->rx_ooo_len);
-        } else {
-            // unfortunately, we can't accept this payload
-            *payload_len = 0;
-            data_meta->rx.plen = POISON_16;
-            xdp_log("Drop packet, ooo_start(%u), ooo_len(%u)", c->rx_ooo_start, c->rx_ooo_len);
-        }
-        // mark this packet is an out-of-order segment
-        data_meta->rx.ooo_bump = OOO_SEGMENT_MASK;
-
-        return rx_bump;
-        //goto unlock;
-    }
-
-    /* update TCP state if we have payload */
-    if (likely(*payload_len)) {
-        rx_bump = *payload_len;
-        c->rx_avail -= *payload_len;
-        c->rx_next_pos += *payload_len;
-        if (c->rx_next_pos >= c->rx_buf_size)
-            c->rx_next_pos -= c->rx_buf_size;
-        c->rx_next_seq += *payload_len;
-
-        // xdp_log("seq(%u), payload_len(%u), c->rx_avail(%u), c->rx_next_pos(%u), c->rx_next_seq(%u)", seq, *payload_len, c->rx_avail, c->rx_next_pos, c->rx_next_seq);
-        
-        /* handle existing out-of-order segments */
-        if (unlikely(c->rx_ooo_len)) {
-            if (tcp_valid_rxseq_ooo(c, c->rx_ooo_start, c->rx_ooo_len, &trim_start, &trim_end)) {
-                /* completely superfluous: drop out of order interval */
-                c->rx_ooo_len = 0;
-                data_meta->rx.ooo_bump = OOO_CLEAR_MASK;
-                int_out->trigger_ack = false;
-                *clear_ooo = true;
-            } else {
-                c->rx_ooo_start += trim_start;
-                c->rx_ooo_len -= trim_start + trim_end;
-
-                // accept out-of-order segments
-                if (c->rx_ooo_len && c->rx_ooo_start == c->rx_next_seq) {
-                    xdp_log("c->rx_ooo_len(%u), c->rx_ooo_start(%u), c->rx_next_seq(%u)", c->rx_ooo_len, c->rx_ooo_start, c->rx_next_seq);
-                    rx_bump += c->rx_ooo_len;
-                    c->rx_avail -= c->rx_ooo_len;
-                    c->rx_next_pos += c->rx_ooo_len;
-                    if (c->rx_next_pos >= c->rx_buf_size)
-                        c->rx_next_pos -= c->rx_buf_size;
-                    c->rx_next_seq += c->rx_ooo_len;
-
-                    c->rx_ooo_len = 0;
-                    // out-of-order segment is processed
-                    data_meta->rx.ooo_bump = OOO_FIN_MASK;
-                    xdp_log("Out-of-order segment is processed");
+        /* check if we can add it to the out of order interval */
+        if (unlikely(ev->seq_num != c->rx_next_seq)) {
+            if (ev->data_len) {
+                xdp_log("OOO packet, seq(%u), c->rx_next_seq(%u)", ev->seq_num, c->rx_next_seq);
+                if (c->rx_ooo_len == 0) {
+                    c->rx_ooo_start = ev->seq_num;
+                    c->rx_ooo_len = ev->data_len;
+                    xdp_log("New segment, ooo_start(%u), ooo_len(%u)", c->rx_ooo_start, c->rx_ooo_len);
+                } else if (ev->seq_num + ev->data_len == c->rx_ooo_start) {
+                    c->rx_ooo_start = ev->seq_num;
+                    c->rx_ooo_len += ev->data_len;
+                    xdp_log("Merge segment, ooo_start(%u), ooo_len(%u)", c->rx_ooo_start, c->rx_ooo_len);
+                } else if (c->rx_ooo_start + c->rx_ooo_len == ev->seq_num) {
+                    c->rx_ooo_len += ev->data_len;
+                    xdp_log("Merge segment, ooo_start(%u), ooo_len(%u)", c->rx_ooo_start, c->rx_ooo_len);
+                } else {
+                    // unfortunately, we can't accept this payload
+                    ev->data_len = 0;
+                    data_meta->rx.plen = POISON_16;
+                    xdp_log("Drop packet, ooo_start(%u), ooo_len(%u)", c->rx_ooo_start, c->rx_ooo_len);
                 }
             }
+            // mark this packet is an out-of-order segment
+            data_meta->rx.ooo_bump = OOO_SEGMENT_MASK;
+        } else {
+            /* update TCP state if we have payload */
+            if (likely(ev->data_len)) {
+                rx_bump = ev->data_len;
+                c->rx_avail -= ev->data_len;
+                c->rx_next_pos += ev->data_len;
+                if (c->rx_next_pos >= c->rx_buf_size)
+                    c->rx_next_pos -= c->rx_buf_size;
+                c->rx_next_seq += ev->data_len;
+
+                // xdp_log("seq(%u), payload_len(%u), c->rx_avail(%u), c->rx_next_pos(%u), c->rx_next_seq(%u)", seq, ev->data_len, c->rx_avail, c->rx_next_pos, c->rx_next_seq);
+                
+                /* handle existing out-of-order segments */
+                if (unlikely(c->rx_ooo_len)) {
+                    if (tcp_valid_rxseq_ooo(c, c->rx_ooo_start, c->rx_ooo_len, &trim_start, &trim_end)) {
+                        /* completely superfluous: drop out of order interval */
+                        c->rx_ooo_len = 0;
+                        data_meta->rx.ooo_bump = OOO_CLEAR_MASK;
+                        int_out->trigger_ack = false;
+                        clear_ooo = true;
+                    } else {
+                        c->rx_ooo_start += trim_start;
+                        c->rx_ooo_len -= trim_start + trim_end;
+
+                        // accept out-of-order segments
+                        if (c->rx_ooo_len && c->rx_ooo_start == c->rx_next_seq) {
+                            xdp_log("c->rx_ooo_len(%u), c->rx_ooo_start(%u), c->rx_next_seq(%u)", c->rx_ooo_len, c->rx_ooo_start, c->rx_next_seq);
+                            rx_bump += c->rx_ooo_len;
+                            c->rx_avail -= c->rx_ooo_len;
+                            c->rx_next_pos += c->rx_ooo_len;
+                            if (c->rx_next_pos >= c->rx_buf_size)
+                                c->rx_next_pos -= c->rx_buf_size;
+                            c->rx_next_seq += c->rx_ooo_len;
+
+                            c->rx_ooo_len = 0;
+                            // out-of-order segment is processed
+                            data_meta->rx.ooo_bump = OOO_FIN_MASK;
+                            xdp_log("Out-of-order segment is processed");
+                        }
+                    }
+                }
+
+                if (unlikely((c->rx_avail >> TCP_WND_SCALE) == 0)) {
+                    // ebpf realized that the receive buffer is empty,
+                    // piggyback a signal to lib, once application releases the buffer, force it sync with us
+                    data_meta->rx.qid |= FORCE_RX_BUMP_MASK;
+                    // bpf_printk("force");
+                }
+                // bpf_printk("c->rx_avail = %u", c->rx_avail);
+            }
+
+            if ((c->rx_remote_avail < ev->rwnd_size << TCP_WND_SCALE)) {
+                /* update TCP receive window */
+                c->rx_remote_avail = ev->rwnd_size << TCP_WND_SCALE;
+            }
         }
-
-        if (unlikely((c->rx_avail >> TCP_WND_SCALE) == 0)) {
-            // ebpf realized that the receive buffer is empty,
-            // piggyback a signal to lib, once application releases the buffer, force it sync with us
-            data_meta->rx.qid |= FORCE_RX_BUMP_MASK;
-            // bpf_printk("force");
-        }
-        // bpf_printk("c->rx_avail = %u", c->rx_avail);
-    }
-    return rx_bump;
-}
-
-static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
-    __u32 cpu, struct bpf_cc *cc) {
-
-    bool clear_ooo = false;
-    __u32 rx_bump = trim_and_handle_ooo(ev->seq_num, &ev->data_len, c, data_meta, int_out, &clear_ooo);
-
-    if ((c->rx_remote_avail < ev->rwnd_size << TCP_WND_SCALE)) {
-        /* update TCP receive window */
-        c->rx_remote_avail = ev->rwnd_size << TCP_WND_SCALE;
     }
 
     // Question: is it okay to assume that c->rx_next_seq will be a value that will be in eTran by default

@@ -201,6 +201,9 @@ static inline void handle_rx(struct app_ctx_per_thread *tctx, struct eTrantcp_co
     uint32_t qid;
     uint16_t py_len;
     uint32_t ooo_bump;
+    #ifdef MTP_ON
+    uint32_t rx_pos;
+    #endif
 
     if (unlikely((uint64_t)conn == POISON_64 || conn == NULL))
     {
@@ -268,9 +271,10 @@ static inline void handle_rx(struct app_ctx_per_thread *tctx, struct eTrantcp_co
     }
 
     #ifdef MTP_ON
-    unsigned int start_seq, end_seq;
+    rx_pos = rxmeta_pos(pkt);
+    uint32_t start_seq, end_seq;
     parse_packet(pkt, &start_seq, &end_seq, py_len);
-    mtp_add_data_seg_wrapper(tctx, pkt, start_seq, end_seq, py_len, conn, addr, cached_rx_bump);
+    mtp_add_data_seg_wrapper(tctx, pkt, start_seq, end_seq, py_len, conn, addr, cached_rx_bump, rx_pos);
     #else
 
     if (ooo_bump != POISON_32)

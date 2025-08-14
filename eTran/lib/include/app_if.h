@@ -187,6 +187,9 @@ struct app_ctx_per_thread {
     unsigned int expected_seq;
     unsigned int ooo_start;
     unsigned int ooo_len;
+    unsigned int last_offset;
+    unsigned int rx_next_pos;
+    unsigned int rx_buf_size;
 };
 
 // application context in application
