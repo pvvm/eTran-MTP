@@ -11,6 +11,9 @@
 #define APP_EVENT 1
 #define TIMER_EVENT 0
 
+#define SEG_DATA 1
+#define UNSEG_DATA 0
+
 struct ts_option {
     __u32 desired_tx_ts;
 };
@@ -30,6 +33,7 @@ struct interm_out {
     bool skip_ack_eps;
     bool trigger_ack;
     bool drop;
+    bool skip_data_eps;
     __u32 num_acked_bytes;
     __u32 go_back_bytes;
 };
@@ -54,6 +58,7 @@ struct net_event {
     // DATA
     // Question: how are we representing hold_addr?
     __u32 data_len;
+    __u32 ts_val;
 
     // SHARED
     __u32 seq_num;

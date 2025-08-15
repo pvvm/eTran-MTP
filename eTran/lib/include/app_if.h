@@ -181,6 +181,15 @@ struct app_ctx_per_thread {
 
     // connections that need to retransmit
     std::list<std::pair<struct eTrantcp_connection *, uint32_t> > retransmission_conns;
+
+    /* Values added in MTP */
+    bool following_packets;
+    unsigned int expected_seq;
+    unsigned int ooo_start;
+    unsigned int ooo_len;
+    unsigned int last_offset;
+    unsigned int rx_next_pos;
+    unsigned int rx_buf_size;
 };
 
 // application context in application

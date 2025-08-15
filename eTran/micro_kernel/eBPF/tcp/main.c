@@ -361,7 +361,8 @@ int xdp_sock_prog(struct xdp_md *ctx)
         return XDP_DROP;
     }
 
-    struct net_event ev = parse_pkt_to_event(tcph, iph, ts_opt);
+    struct net_event ev;
+    parse_pkt_to_event(&ev, tcph, iph, ts_opt);
 
     // Question: sometimes the sender receives packets carrying 100 bytes of data (not ack).
     // Why is that?

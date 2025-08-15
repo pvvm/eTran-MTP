@@ -2,6 +2,7 @@
 #include "eTran_common.h"
 #include "tcp_if.h"
 #include "xsk_if.h"
+#include "funcs_mtp.h"
 #include <eTran_posix.h>
 
 #include <unistd.h>
@@ -200,6 +201,9 @@ static inline void handle_rx(struct app_ctx_per_thread *tctx, struct eTrantcp_co
     uint32_t qid;
     uint16_t py_len;
     uint32_t ooo_bump;
+    #ifdef MTP_ON
+    uint32_t rx_pos;
+    #endif
 
     if (unlikely((uint64_t)conn == POISON_64 || conn == NULL))
     {
@@ -266,6 +270,13 @@ static inline void handle_rx(struct app_ctx_per_thread *tctx, struct eTrantcp_co
         goto out;
     }
 
+    #ifdef MTP_ON
+    rx_pos = rxmeta_pos(pkt);
+    uint32_t start_seq, end_seq;
+    parse_packet(pkt, &start_seq, &end_seq, py_len);
+    mtp_add_data_seg_wrapper(tctx, pkt, start_seq, end_seq, py_len, conn, addr, cached_rx_bump, rx_pos);
+    #else
+
     if (ooo_bump != POISON_32)
     {
         /* An out-of-order interval is finished, this packet is the last acked part 
@@ -295,6 +306,7 @@ static inline void handle_rx(struct app_ctx_per_thread *tctx, struct eTrantcp_co
         in_order_receive(conn, addr, pkt);
         // printf("in_order_receive: rx_bump = %ld\n", *cached_rx_bump);
     }
+    #endif
 
 out:
     if (unlikely(last)) {
