@@ -119,6 +119,20 @@ static __always_inline void mtp_tx_data_flush(struct bpf_tcp_conn *c, struct int
     }
 }
 
+static __always_inline void mtp_add_data_seg_wrapper(__u32 data_len, __u32 offset,
+    struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta) {
+    if(data_len || xsk_budget_avail(c)) {
+        int_out->drop = 0;
+        data_meta->rx.rx_pos = offset;
+        data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
+        if (!data_len) {
+            data_meta->rx.rx_pos = POISON_32;
+            data_meta->rx.poff = POISON_16;
+            data_meta->rx.plen = POISON_16;
+        }
+    }
+}
+
 
 static __always_inline struct app_timer_event parse_req_to_app_event(struct meta_info *data_meta) {
     struct app_timer_event ev;
@@ -236,14 +250,9 @@ static __always_inline int ack_timeout_xdp_ep (struct app_timer_event *ev, struc
     return XDP_PASS; // redirect to userspace
 }
 
-// TODO: remove this tx_nump after the ACK chain is done
 static __always_inline void fast_retr_rec_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
     __u32 cpu, struct bpf_cc *cc) {
-    //bpf_printk("%u %u %u", ev->ack_seq, c->send_una, c->tx_next_seq);
-    //if(ev->ack_seq < c->send_una || c->tx_next_seq < ev->ack_seq) {
-    //    int_out->skip_ack_eps = 1;
-    //    return 0;
-    //}
+
     int_out->drop = 1;
 
     __u32 exp_ack_first = c->send_una;
@@ -371,11 +380,10 @@ static __always_inline void verify_trim_data_ep(struct net_event *ev, struct bpf
     __u32 cpu, struct bpf_cc *cc) {
     int_out->skip_data_eps = false;
     int_out->drop = true;
+    int_out->trigger_ack = true;
 
     __u32 trim_start = 0;
     __u32 trim_end = 0;
-    
-    int_out->trigger_ack = true;
 
     __u32 exp_seq_first = c->rx_next_seq;
     __u32 exp_seq_last = c->rx_next_seq + c->rx_avail;
@@ -422,9 +430,9 @@ static __always_inline void verify_trim_data_ep(struct net_event *ev, struct bpf
 static __always_inline void detect_ooo_data_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
     __u32 cpu, struct bpf_cc *cc) {
     
-    /*if(int_out->skip_data_eps) {
+    if(int_out->skip_data_eps) {
         return;
-    }*/
+    }
 
     if ((ev->seq_num != c->rx_next_seq)) {
         if (!ev->data_len) {
@@ -445,7 +453,7 @@ static __always_inline void detect_ooo_data_ep(struct net_event *ev, struct bpf_
             data_meta->rx.plen = POISON_16;
         }
         // mark this packet is an out-of-order segment
-        data_meta->rx.ooo_bump = 0;
+        //data_meta->rx.ooo_bump = OOO_SEGMENT_MASK;
         int_out->skip_data_eps = true;
     }
 }
@@ -455,6 +463,7 @@ static __always_inline void detect_ooo_data_ep(struct net_event *ev, struct bpf_
 static __always_inline void flush_ooo_data_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
     __u32 cpu, struct bpf_cc *cc) {
     
+    // Question: this check is problematic in the client side
     /*if(int_out->skip_data_eps) {
         return;
     }*/
@@ -469,16 +478,40 @@ static __always_inline void flush_ooo_data_ep(struct net_event *ev, struct bpf_t
     if (ev->data_len && !c->tx_next_ts)
         c->tx_next_ts = ev->ts_val;
 
-    /* check if we can add it to the out of order interval */
-
-        /* update TCP state if we have payload */
+    /* update TCP state if we have payload */
     if (ev->data_len) {
         c->rx_avail -= ev->data_len;
         c->rx_next_seq += ev->data_len;
 
         /* handle existing out-of-order segments */
-        if (unlikely(c->rx_ooo_len)) {
-            if (!tcp_valid_rxseq_ooo(c, c->rx_ooo_start, c->rx_ooo_len, &trim_start, &trim_end)) {
+        if (c->rx_ooo_len) {
+
+            __u32 exp_seq_first = c->rx_next_seq;
+            __u32 exp_seq_last = c->rx_next_seq + c->rx_avail;
+            __u32 pkt_seq_first = c->rx_ooo_start;
+            __u32 pkt_seq_last = c->rx_ooo_start + c->rx_ooo_len;
+        
+            bool valid = seq_in_range(pkt_seq_first, exp_seq_first, exp_seq_last, false) ||
+                            seq_in_range(pkt_seq_last, exp_seq_first, exp_seq_last, true) ||
+                            seq_in_range(exp_seq_first, pkt_seq_first, pkt_seq_last, false) ||
+                            seq_in_range(exp_seq_last, pkt_seq_first, pkt_seq_last, true);
+            
+            if (!valid) {
+                int_out->trigger_ack = false;
+                return;
+            } else {
+                if (seq_in_range(pkt_seq_first, exp_seq_first, exp_seq_last, false)) {
+                    trim_start = 0;
+                } else {
+                    trim_start = exp_seq_first - pkt_seq_first;
+                }
+            
+                if (seq_in_range(pkt_seq_last, exp_seq_first, exp_seq_last, true)) {
+                    trim_end = 0;
+                } else {
+                    trim_end = pkt_seq_last - exp_seq_last;
+                }
+
                 c->rx_ooo_start += trim_start;
                 c->rx_ooo_len -= trim_start + trim_end;
 
@@ -493,25 +526,17 @@ static __always_inline void flush_ooo_data_ep(struct net_event *ev, struct bpf_t
             }
         }
 
-        if (unlikely((c->rx_avail >> TCP_WND_SCALE) == 0)) {
+        /*if (unlikely((c->rx_avail >> TCP_WND_SCALE) == 0)) {
             data_meta->rx.qid |= FORCE_RX_BUMP_MASK;
-        }
+        }*/
     }
 }
 
 static __always_inline void data_net_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
     __u32 cpu, struct bpf_cc *cc) {
+    
+    mtp_add_data_seg_wrapper(ev->data_len, (ev->seq_num - c->recv_init_seq), c, int_out, data_meta);
 
-    if(ev->data_len || xsk_budget_avail(c)) {
-        int_out->drop = 0;
-        data_meta->rx.rx_pos = (ev->seq_num - c->recv_init_seq);
-        data_meta->rx.xsk_budget_avail = xsk_budget_avail(c);
-        if (!ev->data_len) {
-            data_meta->rx.rx_pos = POISON_32;
-            data_meta->rx.poff = POISON_16;
-            data_meta->rx.plen = POISON_16;
-        }
-    }
 }
 
 static __always_inline void send_ack(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
