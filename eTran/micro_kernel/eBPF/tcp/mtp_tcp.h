@@ -368,12 +368,6 @@ static __always_inline void ack_net_ep(struct net_event *ev, struct bpf_tcp_conn
     // The problem is that eTran also does that in case xsk_budget_avail(c)
     mtp_tx_data_flush(c, int_out, rmlen, data_meta);
 
-    // Question IMPORTANT:
-    // This question is about the MTP program.
-    // At the end of the CC/rate/timeout chain, we'll restart the timer.
-    // But where do we start the timer and instantiate the timer event?
-    
-    // TODO: add timer instruction to restart the timeout timer
 }
 
 static __always_inline void verify_trim_data_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
@@ -417,14 +411,23 @@ static __always_inline void verify_trim_data_ep(struct net_event *ev, struct bpf
     payload_off += trim_start;
     if ((ev->data_len >= trim_start + trim_end))
         ev->data_len -= trim_start + trim_end;
+
+    // Question:
+    // How can we abstract this part? We depend on this trim_start
     data_meta->rx.poff = payload_off;
+
+    // Question BUG:
+    // This could be easily abstracted in mtp_add_data_seg_wrapper,
+    // but the problem is that moving this line to that point, a segmentation
+    // fault happens. The segmentation fault starts happening if we move it
+    // to flush_ooo_data_ep, right after the first condition.
+    // This problem doesn't make sense. I wonder if it might be a problem
+    // with the eBPF virtual machine (like that mysterious enum problem we had).
+    // I've started to wonder if this problem is related to the size of the variables,
+    // plen being u16 and data_len being u32. But that doesn't seem to be the case
     data_meta->rx.plen = ev->data_len;
 
     ev->seq_num += trim_start;
-
-    /*data_meta->rx.rx_pos = c->rx_next_pos + (ev->seq_num - c->rx_next_seq);
-    if (data_meta->rx.rx_pos >= c->rx_buf_size)
-        data_meta->rx.rx_pos -= c->rx_buf_size;*/
 }
 
 static __always_inline void detect_ooo_data_ep(struct net_event *ev, struct bpf_tcp_conn *c, struct interm_out *int_out, struct meta_info *data_meta,
@@ -450,6 +453,11 @@ static __always_inline void detect_ooo_data_ep(struct net_event *ev, struct bpf_
         } else {
             // unfortunately, we can't accept this payload
             ev->data_len = 0;
+            // Question BUG:
+            // Similar to the other problem, I can't remove this line
+            // even if it doesn't matter in anyway. Also, simply having
+            // this bpf_printk causes a segmentation fault. 
+            //bpf_printk("HERE");
             data_meta->rx.plen = POISON_16;
         }
         // mark this packet is an out-of-order segment
