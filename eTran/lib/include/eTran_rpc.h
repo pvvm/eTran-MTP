@@ -26,6 +26,21 @@ struct InternalReqMeta;
 using ContHandlerType = std::function<void(ContHandle *cont_handle, void *context)>;
 using ReqHandlerType = std::function<void(ReqHandle *req_handle, void *context)>;
 
+/* MTP definitions */
+struct app_event {
+    uint32_t local_ip;
+    uint32_t remote_ip;
+    uint32_t msg_len;
+    uint64_t addr;
+    uint16_t src_port;
+    uint16_t dest_port;
+    uint64_t rpcid;
+};
+
+struct HOMABP {
+    uint8_t teste;
+};
+
 /* input context for RPC request handler, the content can not be modified */
 struct ReqHandle {
     const Buffer buffer;
@@ -185,6 +200,11 @@ class RpcSocket
 
     /* blocked version of run_event_loop() */
     void run_event_loop_block(int timeout);
+
+    /* MTP functions */
+    void parse_app_request(struct app_event *ev, uint32_t local_ip, uint32_t remote_ip, uint16_t src_port,
+        uint16_t dest_port, uint32_t msg_len, uint64_t addr, uint64_t rpcid);
+    void create_pkt_bp();
 
   private:
     

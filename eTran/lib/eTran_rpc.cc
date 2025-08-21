@@ -5,6 +5,8 @@
 #include <linux/ip.h>
 #include <net/ethernet.h>
 
+#include "homa_funcs_mtp.h"
+
 #define XSK_INFO(qidx) (_tctx->txrx_xsk_info[qidx])
 #define ADD_FQ_WORK(qidx, work) atomic32_add(&_tctx->actx->uring[qidx].fq_work, work)
 #define DEL_FQ_WORK(qidx, work) atomic32_sub(&_tctx->actx->uring[qidx].fq_work, work)
@@ -742,6 +744,17 @@ int RpcSocket::message_tx_segmentation(InternalReqMeta *req_meta, unsigned int s
         }
         req_meta->prev_buffer_addr = addr;
 
+        plen = std::min((size_t)HOMA_MSS, size);
+
+        #ifdef MTP_ON
+        struct app_event *ev = reinterpret_cast<struct app_event *>(pkt + HOMA_PAYLOAD_OFFSET + plen);
+        parse_app_request(ev, _local_addr.sin_addr.s_addr, dest_addr->sin_addr.s_addr,
+            __cpu_to_be16(_local_port), dest_addr->sin_port, __cpu_to_be32(message_length), addr,
+            __cpu_to_be64(req_meta->rpcid));
+        struct HOMABP *bp = reinterpret_cast<struct HOMABP *>(pkt + HOMA_PAYLOAD_OFFSET + plen + sizeof(struct app_event));
+        bp->teste = 1;
+
+        #endif
         /* fill IP header */
         struct iphdr *iph = reinterpret_cast<struct iphdr *>(pkt + sizeof(struct ethhdr));
         iph->saddr = _local_addr.sin_addr.s_addr;
@@ -769,8 +782,6 @@ int RpcSocket::message_tx_segmentation(InternalReqMeta *req_meta, unsigned int s
         d->incoming = 0;
         d->cutoff_version = 0;
         
-        plen = std::min((size_t)HOMA_MSS, size);
-        
         d->seg.offset = __cpu_to_be32(copy_offset);
         d->seg.segment_length = __cpu_to_be32(plen);
         d->seg.ack.rpcid = 0;
@@ -786,7 +797,11 @@ int RpcSocket::message_tx_segmentation(InternalReqMeta *req_meta, unsigned int s
         
         /* fill AF_XDP descriptor */
         desc->addr = addr;
+        #ifdef MTP_ON
+        desc->len = HOMA_PAYLOAD_OFFSET + plen + sizeof(struct app_event) + sizeof(struct HOMABP);
+        #else
         desc->len = HOMA_PAYLOAD_OFFSET + plen;
+        #endif
         desc->options = XDP_EGRESS_NO_COMP;
     }
 

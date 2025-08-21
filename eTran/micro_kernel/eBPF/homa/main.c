@@ -20,6 +20,8 @@
 #include "pacing.h"
 #include "homa.h"
 
+#include "mtp_defs.h"
+
 char LICENSE[] SEC("license") = "GPL";
 
 // #define HELP_PACER
@@ -224,6 +226,23 @@ int xdp_egress_prog(struct xdp_md *ctx)
 
     /* adjust data_meta to access metadata in headroom */
     CHECK_AND_DROP_LOG(bpf_xdp_adjust_meta(ctx, -(int)sizeof(*data_meta)) != 0, "xdp_adjust_meta failed");
+
+    #ifdef MTP_ON
+    int err = 0;
+    data_meta = (struct homa_meta_info *)(long)ctx->data_meta;
+    data_end = (void *)(long)ctx->data_end;
+    data = (void *)(long)ctx->data;
+    //bpf_printk("%ld", data_end - data);
+    if (unlikely(err = bpf_xdp_adjust_tail(ctx, -(sizeof(struct app_event) + sizeof(struct HOMABP)))))
+    {
+        bpf_printk("ERROR: bpf_xdp_adjust_tail failed: %d\n", err);
+        return XDP_DROP;
+    }
+    data_meta = (struct homa_meta_info *)(long)ctx->data_meta;
+    data_end = (void *)(long)ctx->data_end;
+    data = (void *)(long)ctx->data;
+    bpf_printk("%ld", data_end - data);
+    #endif
     
     /* verify after calling bpf_xdp_ajdust_meta() */
     data_meta = (struct homa_meta_info *)(long)ctx->data_meta;

@@ -2,7 +2,7 @@
 #include "eTran_common.h"
 #include "tcp_if.h"
 #include "xsk_if.h"
-#include "funcs_mtp.h"
+#include "tcp_funcs_mtp.h"
 #include <eTran_posix.h>
 
 #include <unistd.h>
