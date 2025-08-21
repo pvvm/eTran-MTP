@@ -491,7 +491,7 @@ void init_server_addrs(void)
 		if (node == id)
 			continue;
 
-		snprintf(host, sizeof(host), "node%d", node);
+		snprintf(host, sizeof(host), "node-%d", node);
 		memset(&hints, 0, sizeof(struct addrinfo));
 		hints.ai_family = inet_family;
 		hints.ai_socktype = SOCK_DGRAM;
