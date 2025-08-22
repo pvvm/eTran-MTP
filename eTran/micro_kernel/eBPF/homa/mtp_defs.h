@@ -79,7 +79,6 @@ int send_req_ep_cient(struct iphdr *iph, struct app_event *ev,
         }
     }
 
-    #if 0
     if (offset + packet_bytes < Homa_unsched_bytes)
         set_prio(iph, get_prio(message_length));
     else
@@ -138,6 +137,10 @@ int send_req_ep_cient(struct iphdr *iph, struct app_event *ev,
     }
     
     *rpc_qid = ctx->qid;
+
+
+    // TODO: understand why this is problematic
+    #if 0
     *trigger = cc_granted >= (offset + packet_bytes);
 
     #endif

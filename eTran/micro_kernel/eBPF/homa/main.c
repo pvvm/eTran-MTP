@@ -310,7 +310,9 @@ int xdp_egress_prog(struct xdp_md *ctx)
         action = server_response(iph, d, buffer_addr, &rpc_qid, &trigger);
     #endif
     
-    CHECK_AND_DROP_LOG(action != XDP_TX && action != XDP_REDIRECT, "action != XDP_TX && action != XDP_REDIRECT");
+    if(action != XDP_TX && action != XDP_REDIRECT)
+        return XDP_DROP;
+    //CHECK_AND_DROP_LOG(action != XDP_TX && action != XDP_REDIRECT, "action != XDP_TX && action != XDP_REDIRECT");
 
     /* piggyback ACK in this packet to free server rpc at remote side */
     struct dead_client_rpc_info dead_crpc = {0};
@@ -328,31 +330,29 @@ int xdp_egress_prog(struct xdp_md *ctx)
 
     fill_ip_hdr(iph, (data_end - data));
 
-    #ifdef MTP_ON
+    // TODO: understand why this is problematic
+    /*#ifdef MTP_ON
     int err = 0;
-    data_meta = (struct homa_meta_info *)(long)ctx->data_meta;
     data_end = (void *)(long)ctx->data_end;
     data = (void *)(long)ctx->data;
-    bpf_printk("%ld", data_end - data);
-    if (unlikely(err = bpf_xdp_adjust_tail(ctx, -(sizeof(struct app_event) + sizeof(struct HOMABP)))))
+
+    if (unlikely(err = bpf_xdp_adjust_tail(ctx, -((int)sizeof(struct app_event) + (int)sizeof(struct HOMABP)))))
     {
-        bpf_printk("ERROR: bpf_xdp_adjust_tail failed: %d\n", err);
         return XDP_DROP;
     }
-    data_meta = (struct homa_meta_info *)(long)ctx->data_meta;
     data_end = (void *)(long)ctx->data_end;
     data = (void *)(long)ctx->data;
-    bpf_printk("%ld", data_end - data);
-
-    CHECK_AND_DROP_LOG(data_meta + 1 > data, "data_meta + 1 > data_end");
 
     eth = (struct ethhdr *)data;
     iph = (struct iphdr *)(eth + 1);
     c = (struct common_header *)(iph + 1);
     d = (struct data_header *)c;
     
-    CHECK_AND_DROP_LOG(d + 1 > data_end, "d + 1 > data_end");
-    #endif
+    if(!d)
+        return XDP_DROP;
+    if(d + 1 > data_end)
+        return XDP_DROP;
+    #endif*/
 
     if (action == XDP_TX)
         return xmit_packet(ctx, eth, iph);
