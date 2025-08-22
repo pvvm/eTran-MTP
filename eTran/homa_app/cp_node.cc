@@ -1285,7 +1285,7 @@ void homa_client::sender(uint32_t local_ip, uint16_t local_port)
 		header->freeze = 0;
 		header->short_response = one_way;
 		header->msg_id = slot;
-        
+
         dest_addr.sin_family = AF_INET;
         dest_addr.sin_port = server_addrs[server].in4.sin_port;
         memcpy(&dest_addr.sin_addr, &server_addrs[server].in4.sin_addr, sizeof(dest_addr.sin_addr));

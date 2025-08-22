@@ -232,7 +232,7 @@ int xdp_egress_prog(struct xdp_md *ctx)
     data_meta = (struct homa_meta_info *)(long)ctx->data_meta;
     data_end = (void *)(long)ctx->data_end;
     data = (void *)(long)ctx->data;
-    //bpf_printk("%ld", data_end - data);
+    bpf_printk("%ld", data_end - data);
     if (unlikely(err = bpf_xdp_adjust_tail(ctx, -(sizeof(struct app_event) + sizeof(struct HOMABP)))))
     {
         bpf_printk("ERROR: bpf_xdp_adjust_tail failed: %d\n", err);

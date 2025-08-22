@@ -27,6 +27,7 @@ using ContHandlerType = std::function<void(ContHandle *cont_handle, void *contex
 using ReqHandlerType = std::function<void(ReqHandle *req_handle, void *context)>;
 
 /* MTP definitions */
+
 struct app_event {
     uint32_t local_ip;
     uint32_t remote_ip;
@@ -37,8 +38,38 @@ struct app_event {
     uint64_t rpcid;
 };
 
+struct HOMA_ACK {
+    uint64_t rpcid;
+    uint16_t sport;
+    uint16_t dport;
+};
+
+struct DATA_SEG {
+    uint32_t offset;
+    uint32_t segment_length;
+    struct HOMA_ACK ack;
+};
+
+struct DATA_HDR {
+    uint32_t message_length;
+    uint32_t incoming;
+    uint16_t cutoff_version;
+    uint8_t retransmit;
+    struct DATA_SEG seg;
+};
+
+struct COMMON_HDR {
+    uint32_t src_port;
+    uint32_t dest_port;
+    uint8_t doff;
+    uint8_t type;
+    uint16_t seq;
+    uint64_t sender_id;
+};
+
 struct HOMABP {
-    uint8_t teste;
+    struct COMMON_HDR common;
+    struct DATA_HDR data;
 };
 
 /* input context for RPC request handler, the content can not be modified */
@@ -85,6 +116,10 @@ struct InternalReqMeta {
     uint8_t qidx;
     uint8_t slot_idx;
     uint32_t recv_count;
+
+    /* MTP fields */
+    uint32_t rest_msg_len;
+    uint32_t curr_offset;
 };
 
 /* used by internal for enqueuing request, which is opaque to application */
@@ -204,7 +239,7 @@ class RpcSocket
     /* MTP functions */
     void parse_app_request(struct app_event *ev, uint32_t local_ip, uint32_t remote_ip, uint16_t src_port,
         uint16_t dest_port, uint32_t msg_len, uint64_t addr, uint64_t rpcid);
-    void create_pkt_bp();
+    void send_req_ep_user(struct HOMABP *bp, struct app_event *ev, struct InternalReqMeta *ctx);
 
   private:
     

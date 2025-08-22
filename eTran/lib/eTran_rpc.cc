@@ -748,12 +748,11 @@ int RpcSocket::message_tx_segmentation(InternalReqMeta *req_meta, unsigned int s
 
         #ifdef MTP_ON
         struct app_event *ev = reinterpret_cast<struct app_event *>(pkt + HOMA_PAYLOAD_OFFSET + plen);
+        struct HOMABP *bp = reinterpret_cast<struct HOMABP *>(pkt + HOMA_PAYLOAD_OFFSET + plen + sizeof(struct app_event));
         parse_app_request(ev, _local_addr.sin_addr.s_addr, dest_addr->sin_addr.s_addr,
             __cpu_to_be16(_local_port), dest_addr->sin_port, __cpu_to_be32(message_length), addr,
             __cpu_to_be64(req_meta->rpcid));
-        struct HOMABP *bp = reinterpret_cast<struct HOMABP *>(pkt + HOMA_PAYLOAD_OFFSET + plen + sizeof(struct app_event));
-        bp->teste = 1;
-
+        send_req_ep_user(bp, ev, req_meta);
         #endif
         /* fill IP header */
         struct iphdr *iph = reinterpret_cast<struct iphdr *>(pkt + sizeof(struct ethhdr));
@@ -768,7 +767,6 @@ int RpcSocket::message_tx_segmentation(InternalReqMeta *req_meta, unsigned int s
         d->common.doff = (sizeof(struct data_header) - sizeof(struct data_segment)) >> 2;
         d->common.type = DATA;
         d->common.seq = __cpu_to_be16(req_meta->seq);
-        req_meta->seq++;
         d->common.sender_id = __cpu_to_be64(req_meta->rpcid);
 
         d->message_length = __cpu_to_be32(message_length);
@@ -776,6 +774,7 @@ int RpcSocket::message_tx_segmentation(InternalReqMeta *req_meta, unsigned int s
         /* we use this unused1 field to store the slot_idx, 
          * this can help us to find the req_meta slot when we receive the response 
          */
+        // TODO: this line also needs to be in MTP option
         d->unused1 = slot_idx;
 
         /* the following two fileds are written by XDP_EGRESS */
@@ -792,14 +791,14 @@ int RpcSocket::message_tx_segmentation(InternalReqMeta *req_meta, unsigned int s
         pkt += HOMA_PAYLOAD_OFFSET;
         memcpy(pkt, buffer._buf + copy_offset, plen);
         
-        copy_offset += plen;
-        size -= plen;
-        
         /* fill AF_XDP descriptor */
         desc->addr = addr;
         #ifdef MTP_ON
         desc->len = HOMA_PAYLOAD_OFFSET + plen + sizeof(struct app_event) + sizeof(struct HOMABP);
         #else
+        req_meta->seq++;
+        copy_offset += plen;
+        size -= plen;
         desc->len = HOMA_PAYLOAD_OFFSET + plen;
         #endif
         desc->options = XDP_EGRESS_NO_COMP;

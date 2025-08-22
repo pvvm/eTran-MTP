@@ -6,7 +6,7 @@
 #include <eTran_rpc.h>
 
 
-#define MTP_ON 1
+//#define MTP_ON 1
 
 void RpcSocket::parse_app_request(struct app_event *ev, uint32_t local_ip, uint32_t remote_ip, uint16_t src_port,
     uint16_t dest_port, uint32_t msg_len, uint64_t addr, uint64_t rpcid) {
@@ -19,36 +19,37 @@ void RpcSocket::parse_app_request(struct app_event *ev, uint32_t local_ip, uint3
     ev->rpcid = rpcid;
 }
 
-void RpcSocket::create_pkt_bp() {
-    /*struct iphdr *iph = reinterpret_cast<struct iphdr *>(pkt + sizeof(struct ethhdr));
-    iph->saddr = _local_addr.sin_addr.s_addr;
-    iph->daddr = dest_addr->sin_addr.s_addr;
-    iph->protocol = IPPROTO_HOMA;
+void RpcSocket::send_req_ep_user(struct HOMABP *bp, struct app_event *ev, struct InternalReqMeta *ctx) {
+    if(ctx->rest_msg_len == 0) {
+        ctx->rest_msg_len = ev->msg_len;
+    }
 
-    struct data_header *d = reinterpret_cast<struct data_header *>(pkt + sizeof(struct ethhdr) + sizeof(struct iphdr));
-    d->common.sport = __cpu_to_be16(_local_port);
-    d->common.dport = dest_addr->sin_port;
-    d->common.doff = (sizeof(struct data_header) - sizeof(struct data_segment)) >> 2;
-    d->common.type = DATA;
-    d->common.seq = __cpu_to_be16(req_meta->seq);
-    req_meta->seq++;
-    d->common.sender_id = __cpu_to_be64(req_meta->rpcid);
+    bp->common.src_port = ev->src_port;
+    bp->common.dest_port = ev->dest_port;
+    bp->common.seq = ctx->seq;
+    bp->common.src_port = ev->rpcid;
+    bp->common.doff = (sizeof(struct data_header) - sizeof(struct data_segment)) >> 2;
+    bp->common.type = DATA;
 
-    d->message_length = __cpu_to_be32(message_length);
-    d->retransmit = 0;
+    bp->data.message_length = ev->msg_len;
+    bp->data.retransmit = 0;
+    bp->data.incoming = 0;
+    bp->data.cutoff_version = 0;
 
-    d->unused1 = slot_idx;
+    bp->data.seg.offset = ctx->curr_offset;
 
-    d->incoming = 0;
-    d->cutoff_version = 0;
-    
-    plen = std::min((size_t)HOMA_MSS, size);
-    
-    d->seg.offset = __cpu_to_be32(copy_offset);
-    d->seg.segment_length = __cpu_to_be32(plen);
-    d->seg.ack.rpcid = 0;
-    d->seg.ack.dport = 0;
-    d->seg.ack.sport = 0;*/
+    uint32_t plen = ctx->rest_msg_len;
+    if(plen > HOMA_MSS)
+        plen = HOMA_MSS;
+    bp->data.seg.segment_length = plen;
+
+    bp->data.seg.ack.rpcid = 0;
+    bp->data.seg.ack.dport = 0;
+    bp->data.seg.ack.sport = 0;
+
+    ctx->seq++;
+    ctx->curr_offset += plen;
+    ctx->rest_msg_len -= plen;
 }
 
 #endif
