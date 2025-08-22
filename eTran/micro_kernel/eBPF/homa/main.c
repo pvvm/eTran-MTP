@@ -226,23 +226,6 @@ int xdp_egress_prog(struct xdp_md *ctx)
 
     /* adjust data_meta to access metadata in headroom */
     CHECK_AND_DROP_LOG(bpf_xdp_adjust_meta(ctx, -(int)sizeof(*data_meta)) != 0, "xdp_adjust_meta failed");
-
-    #ifdef MTP_ON
-    int err = 0;
-    data_meta = (struct homa_meta_info *)(long)ctx->data_meta;
-    data_end = (void *)(long)ctx->data_end;
-    data = (void *)(long)ctx->data;
-    bpf_printk("%ld", data_end - data);
-    if (unlikely(err = bpf_xdp_adjust_tail(ctx, -(sizeof(struct app_event) + sizeof(struct HOMABP)))))
-    {
-        bpf_printk("ERROR: bpf_xdp_adjust_tail failed: %d\n", err);
-        return XDP_DROP;
-    }
-    data_meta = (struct homa_meta_info *)(long)ctx->data_meta;
-    data_end = (void *)(long)ctx->data_end;
-    data = (void *)(long)ctx->data;
-    bpf_printk("%ld", data_end - data);
-    #endif
     
     /* verify after calling bpf_xdp_ajdust_meta() */
     data_meta = (struct homa_meta_info *)(long)ctx->data_meta;
@@ -264,19 +247,68 @@ int xdp_egress_prog(struct xdp_md *ctx)
     if (unlikely(data_meta->tx.slowpath)) {
         return xmit_packet(ctx, eth, iph);
     }
+
+    #ifndef MTP_ON
     CHECK_AND_DROP_LOG(c->type != DATA, "not DATA packet");
+    #endif
     
     if (unlikely(d->retransmit)) {
         // TODO: we should throttle retransmitted packets
         return xmit_packet(ctx, eth, iph);
     }
+
+    #ifdef MTP_ON
+
+    struct app_event *ev;
+    struct HOMABP *bp;
     
+    __u32 seg_len = (data_end - data) - sizeof(*eth) - sizeof(*iph) - sizeof(*d) - sizeof(*ev) - sizeof(*bp);
+    if(seg_len > DEFAULT_MTU) {
+        bpf_printk("Error here 1");
+        return XDP_DROP;
+    }
+    if((void *)d + sizeof(*d) + seg_len > data_end) {
+        bpf_printk("Error here 2");
+        return XDP_DROP;
+    }
+    void *payload_end = (void *)d + sizeof(*d) + seg_len;
+
+    ev = (struct app_event *) payload_end;
+    CHECK_AND_DROP_LOG(ev + 1 > data_end, "ev + 1 > data_end");
+
+    bp = (struct HOMABP *)(ev + 1);
+    CHECK_AND_DROP_LOG(bp + 1 > data_end, "bp + 1 > data_end");
+
+    CHECK_AND_DROP_LOG(bp->common.type != DATA, "not DATA packet");
+
+    struct rpc_key_t hkey = {0};
+    hkey.local_port = bpf_ntohs(bp->common.src_port);
+    hkey.remote_port = bpf_ntohs(bp->common.dest_port);
+    hkey.rpcid = bpf_be64_to_cpu(bp->common.sender_id);
+    hkey.remote_ip = bpf_ntohl(iph->daddr);
+
+    struct rpc_state *state = NULL;
+    state = bpf_map_lookup_elem(&rpc_tbl, &hkey);
+    if(!state) {
+        struct rpc_state new_state = {0};
+        CHECK_AND_DROP_LOG(bpf_map_update_elem(&rpc_tbl, &hkey, &new_state, BPF_NOEXIST), "client_request, bpf_map_update_elem failed.");
+        state = bpf_map_lookup_elem(&rpc_tbl, &hkey);
+        CHECK_AND_DROP_LOG(!state, "client_request, bpf_map_lookup_elem failed.");
+    }
+    if (rpc_is_client(bpf_be64_to_cpu(bp->common.sender_id)))
+        action = send_req_ep_cient(iph, ev, bp, state, &rpc_qid, &trigger);
+    else
+        action = send_resp_ep_server(iph, ev, bp, state, &rpc_qid, &trigger);
+    #endif
+    
+    #ifndef MTP_ON
     __u64 buffer_addr = data_meta->tx.buffer_addr;
 
     if (rpc_is_client(bpf_be64_to_cpu(d->common.sender_id)))
         action = client_request(iph, d, buffer_addr, &rpc_qid, &trigger);
     else
         action = server_response(iph, d, buffer_addr, &rpc_qid, &trigger);
+    #endif
     
     CHECK_AND_DROP_LOG(action != XDP_TX && action != XDP_REDIRECT, "action != XDP_TX && action != XDP_REDIRECT");
 
@@ -295,6 +327,32 @@ int xdp_egress_prog(struct xdp_md *ctx)
     }
 
     fill_ip_hdr(iph, (data_end - data));
+
+    #ifdef MTP_ON
+    int err = 0;
+    data_meta = (struct homa_meta_info *)(long)ctx->data_meta;
+    data_end = (void *)(long)ctx->data_end;
+    data = (void *)(long)ctx->data;
+    bpf_printk("%ld", data_end - data);
+    if (unlikely(err = bpf_xdp_adjust_tail(ctx, -(sizeof(struct app_event) + sizeof(struct HOMABP)))))
+    {
+        bpf_printk("ERROR: bpf_xdp_adjust_tail failed: %d\n", err);
+        return XDP_DROP;
+    }
+    data_meta = (struct homa_meta_info *)(long)ctx->data_meta;
+    data_end = (void *)(long)ctx->data_end;
+    data = (void *)(long)ctx->data;
+    bpf_printk("%ld", data_end - data);
+
+    CHECK_AND_DROP_LOG(data_meta + 1 > data, "data_meta + 1 > data_end");
+
+    eth = (struct ethhdr *)data;
+    iph = (struct iphdr *)(eth + 1);
+    c = (struct common_header *)(iph + 1);
+    d = (struct data_header *)c;
+    
+    CHECK_AND_DROP_LOG(d + 1 > data_end, "d + 1 > data_end");
+    #endif
 
     if (action == XDP_TX)
         return xmit_packet(ctx, eth, iph);

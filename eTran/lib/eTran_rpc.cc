@@ -679,7 +679,7 @@ int RpcSocket::message_tx_segmentation(InternalReqMeta *req_meta, unsigned int s
 {
     Buffer buffer = req_meta->buffer;
     struct sockaddr_in *dest_addr = &req_meta->dest_addr;
-    
+     
     size_t size = buffer.actual_size;
     unsigned int message_length = (unsigned int)size;
 
@@ -747,13 +747,28 @@ int RpcSocket::message_tx_segmentation(InternalReqMeta *req_meta, unsigned int s
         plen = std::min((size_t)HOMA_MSS, size);
 
         #ifdef MTP_ON
+        struct iphdr *iph = reinterpret_cast<struct iphdr *>(pkt + sizeof(struct ethhdr));
+        iph->saddr = _local_addr.sin_addr.s_addr;
+        iph->daddr = dest_addr->sin_addr.s_addr;
+        iph->protocol = IPPROTO_HOMA;
+
+        struct data_header *d = reinterpret_cast<struct data_header *>(pkt + sizeof(struct ethhdr) + sizeof(struct iphdr));
+        d->unused1 = slot_idx;
+
+        printf("%lu, %lu, %u\n", HOMA_PAYLOAD_OFFSET + plen, HOMA_PAYLOAD_OFFSET, plen);
         struct app_event *ev = reinterpret_cast<struct app_event *>(pkt + HOMA_PAYLOAD_OFFSET + plen);
         struct HOMABP *bp = reinterpret_cast<struct HOMABP *>(pkt + HOMA_PAYLOAD_OFFSET + plen + sizeof(struct app_event));
+
         parse_app_request(ev, _local_addr.sin_addr.s_addr, dest_addr->sin_addr.s_addr,
-            __cpu_to_be16(_local_port), dest_addr->sin_port, __cpu_to_be32(message_length), addr,
-            __cpu_to_be64(req_meta->rpcid));
+            _local_port, dest_addr->sin_port, message_length, addr,
+            req_meta->rpcid);
+
         send_req_ep_user(bp, ev, req_meta);
-        #endif
+        printf("%u\n", __cpu_to_be16(_local_port));
+        printf("%u\n", _local_port);
+        printf("%u\n", message_length);
+        printf("%u\n", __cpu_to_be32(message_length));
+        #else
         /* fill IP header */
         struct iphdr *iph = reinterpret_cast<struct iphdr *>(pkt + sizeof(struct ethhdr));
         iph->saddr = _local_addr.sin_addr.s_addr;
@@ -774,7 +789,6 @@ int RpcSocket::message_tx_segmentation(InternalReqMeta *req_meta, unsigned int s
         /* we use this unused1 field to store the slot_idx, 
          * this can help us to find the req_meta slot when we receive the response 
          */
-        // TODO: this line also needs to be in MTP option
         d->unused1 = slot_idx;
 
         /* the following two fileds are written by XDP_EGRESS */
@@ -786,6 +800,7 @@ int RpcSocket::message_tx_segmentation(InternalReqMeta *req_meta, unsigned int s
         d->seg.ack.rpcid = 0;
         d->seg.ack.dport = 0;
         d->seg.ack.sport = 0;
+        #endif
 
         /* copy data */
         pkt += HOMA_PAYLOAD_OFFSET;
@@ -793,6 +808,7 @@ int RpcSocket::message_tx_segmentation(InternalReqMeta *req_meta, unsigned int s
         
         /* fill AF_XDP descriptor */
         desc->addr = addr;
+        desc->options = XDP_EGRESS_NO_COMP;
         #ifdef MTP_ON
         desc->len = HOMA_PAYLOAD_OFFSET + plen + sizeof(struct app_event) + sizeof(struct HOMABP);
         #else
@@ -801,7 +817,6 @@ int RpcSocket::message_tx_segmentation(InternalReqMeta *req_meta, unsigned int s
         size -= plen;
         desc->len = HOMA_PAYLOAD_OFFSET + plen;
         #endif
-        desc->options = XDP_EGRESS_NO_COMP;
     }
 
     xsk_ring_prod__submit(tx, i);
@@ -810,5 +825,9 @@ int RpcSocket::message_tx_segmentation(InternalReqMeta *req_meta, unsigned int s
 
     *send_out += i;
 
+    #ifdef MTP_ON
+    return req_meta->curr_offset >= buffer.actual_size ? 1 : 0;
+    #else
     return copy_offset >= buffer.actual_size ? 1 : 0;
+    #endif
 }

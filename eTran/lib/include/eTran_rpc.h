@@ -107,7 +107,7 @@ struct ContHandle {
 /* used by internal for transmission, which is opaque to application */
 struct InternalReqMeta {
     Buffer buffer;
-    struct sockaddr_in dest_addr;
+    struct sockaddr_in dest_addr; 
     uint64_t rpcid;
     uint16_t seq;
     uint64_t prev_buffer_addr;
