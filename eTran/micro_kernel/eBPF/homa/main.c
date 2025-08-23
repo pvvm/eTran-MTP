@@ -296,9 +296,11 @@ int xdp_egress_prog(struct xdp_md *ctx)
         CHECK_AND_DROP_LOG(!state, "client_request, bpf_map_lookup_elem failed.");
     }
     if (rpc_is_client(bpf_be64_to_cpu(bp->common.sender_id)))
-        action = send_req_ep_cient(iph, ev, bp, state, &rpc_qid, &trigger);
+        action = send_req_ep_cient(d, iph, ev, bp, state, &rpc_qid, &trigger);
+    //else
+    //    action = send_resp_ep_server(d, iph, ev, bp, state, &rpc_qid, &trigger);
     else
-        action = send_resp_ep_server(iph, ev, bp, state, &rpc_qid, &trigger);
+        action = XDP_TX;
     #endif
     
     #ifndef MTP_ON
@@ -310,9 +312,7 @@ int xdp_egress_prog(struct xdp_md *ctx)
         action = server_response(iph, d, buffer_addr, &rpc_qid, &trigger);
     #endif
     
-    if(action != XDP_TX && action != XDP_REDIRECT)
-        return XDP_DROP;
-    //CHECK_AND_DROP_LOG(action != XDP_TX && action != XDP_REDIRECT, "action != XDP_TX && action != XDP_REDIRECT");
+    CHECK_AND_DROP_LOG(action != XDP_TX && action != XDP_REDIRECT, "action != XDP_TX && action != XDP_REDIRECT");
 
     /* piggyback ACK in this packet to free server rpc at remote side */
     struct dead_client_rpc_info dead_crpc = {0};
@@ -331,7 +331,7 @@ int xdp_egress_prog(struct xdp_md *ctx)
     fill_ip_hdr(iph, (data_end - data));
 
     // TODO: understand why this is problematic
-    /*#ifdef MTP_ON
+    #ifdef MTP_ON
     int err = 0;
     data_end = (void *)(long)ctx->data_end;
     data = (void *)(long)ctx->data;
@@ -348,11 +348,8 @@ int xdp_egress_prog(struct xdp_md *ctx)
     c = (struct common_header *)(iph + 1);
     d = (struct data_header *)c;
     
-    if(!d)
-        return XDP_DROP;
-    if(d + 1 > data_end)
-        return XDP_DROP;
-    #endif*/
+    CHECK_AND_DROP_LOG(d + 1 > data_end, "d + 1 > data_end");
+    #endif
 
     if (action == XDP_TX)
         return xmit_packet(ctx, eth, iph);

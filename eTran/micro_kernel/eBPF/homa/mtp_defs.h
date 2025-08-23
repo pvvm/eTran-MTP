@@ -45,7 +45,7 @@ struct HOMABP {
 };
 
 static __always_inline
-int send_req_ep_cient(struct iphdr *iph, struct app_event *ev, 
+int send_req_ep_cient(struct data_header *d, struct iphdr *iph, struct app_event *ev, 
     struct HOMABP *bp, struct rpc_state *ctx,
     __u64 *rpc_qid, bool *trigger)
 {
@@ -138,18 +138,13 @@ int send_req_ep_cient(struct iphdr *iph, struct app_event *ev,
     
     *rpc_qid = ctx->qid;
 
-
-    // TODO: understand why this is problematic
-    #if 0
     *trigger = cc_granted >= (offset + packet_bytes);
-
-    #endif
 
     return XDP_REDIRECT;
 }
 
 static __always_inline
-int send_resp_ep_server(struct iphdr *iph, struct app_event *ev, 
+int send_resp_ep_server(struct data_header *d, struct iphdr *iph, struct app_event *ev, 
     struct HOMABP *bp, struct rpc_state *ctx,
     __u64 *rpc_qid, bool *trigger)
 {
