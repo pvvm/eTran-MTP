@@ -373,12 +373,14 @@ int xdp_sock_prog(struct xdp_md *ctx)
     struct hdr_cursor nh = {0};
     
     struct iphdr *iph;
+    //#ifndef MTP_ON
     struct common_header *homa_common_hdr;
     struct data_header *homa_data_hdr;
     struct grant_header *homa_grant_hdr;
     struct busy_header *homa_busy_hdr;
     struct resend_header *homa_resend_hdr;
     struct unknown_header *homa_unknown_hdr;
+    //#endif
     struct slow_path_info *sp;
     
     int proto_type;
@@ -414,6 +416,11 @@ int xdp_sock_prog(struct xdp_md *ctx)
     nh.pos = data + sizeof(struct ethhdr) + sizeof(struct iphdr);
     iph = (struct iphdr *)(data + sizeof(struct ethhdr));
 
+    struct net_event ev;
+    proto_type = parse_packet_mtp(&nh, iph, data_end, &ev);
+    CHECK_AND_DROP_LOG(proto_type < 0, "homa_parse_common_hdr failed");
+
+    //#ifndef MTP_ON
     proto_type = homa_parse_common_hdr(&nh, data_end, &homa_common_hdr);
     CHECK_AND_DROP_LOG(proto_type < 0, "homa_parse_common_hdr failed");
     
@@ -425,6 +432,7 @@ int xdp_sock_prog(struct xdp_md *ctx)
     
     single_packet = homa_parse_data_hdr(&nh, data_end, &homa_data_hdr);
     CHECK_AND_DROP_LOG(single_packet < 0, "homa_parse_data_hdr failed");
+    //#endif
 
 // load balancing
 #ifdef LB

@@ -1,5 +1,32 @@
 #define MTP_ON 1
 
+struct net_event {
+    // IP addrs
+    __u32 remote_ip;
+
+    // Common header
+    __u16 local_port;
+    __u16 remote_port;
+    __u8 type;
+    __u16 seq;
+    __be64 sender_id;
+
+    // Data header
+    __u32 message_length;
+    __u32 incoming;
+    __u8 retransmit;
+
+    // Grant/Resend header
+    __u32 offset;
+    __u8 priority;
+
+    // Grant header
+    __u8 resend_all;
+
+    // Resend header
+    __u32 length;
+};
+
 struct app_event {
     __u32 local_ip;
     __u32 remote_ip;
@@ -283,4 +310,76 @@ int send_resp_ep_server(struct data_header *d, struct iphdr *iph, struct app_eve
     *trigger = cc_granted >= (offset + packet_bytes);
 
     return XDP_REDIRECT;
+}
+
+
+/*************** Network Events ****************/
+
+static __always_inline void parse_data_hdr_mtp(struct common_header *c,
+    void *data_end, struct net_event *ev) {
+
+    struct data_header *d = (struct data_header *)c;
+    if(d + 1 > data_end)
+        return;
+
+    ev->message_length = bpf_ntohl(d->message_length);
+    ev->incoming = bpf_ntohl(d->incoming);
+    ev->retransmit = d->retransmit;
+}
+
+static __always_inline void parse_grant_hdr_mtp(struct common_header *c,
+    void *data_end, struct net_event *ev) {
+
+    struct grant_header *g = (struct grant_header *)c;
+    if(g + 1 > data_end)
+        return;
+
+    ev->offset = bpf_ntohl(g->offset);
+    ev->priority = g->priority;
+    ev->resend_all = g->resend_all;
+}
+
+static __always_inline void parse_resend_hdr_mtp(struct common_header *c,
+    void *data_end, struct net_event *ev) {
+
+    struct resend_header *r = (struct resend_header *)c;
+    if(r + 1 > data_end)
+        return;
+
+    ev->offset = bpf_ntohl(r->offset);
+    ev->priority = r->priority;
+    ev->length = bpf_ntohl(r->length);
+}
+
+static __always_inline int parse_packet_mtp(struct hdr_cursor *nh, struct iphdr *iph,
+    void *data_end, struct net_event *ev) {
+
+    struct common_header *homa_common_h = nh->pos;
+
+    if (homa_common_h + 1 > data_end)
+        return -1;
+
+    ev->remote_ip = bpf_ntohl(iph->saddr);
+
+    ev->local_port = bpf_ntohs(homa_common_h->dport);
+    ev->remote_port = bpf_ntohs(homa_common_h->sport);
+    ev->type = homa_common_h->type;
+    ev->seq = bpf_ntohs(homa_common_h->seq);
+    ev->sender_id = bpf_be64_to_cpu(homa_common_h->sender_id);
+
+    switch(ev->type) {
+        case DATA:
+            parse_data_hdr_mtp(homa_common_h, data_end, ev);
+            break;
+        case GRANT:
+            parse_grant_hdr_mtp(homa_common_h, data_end, ev);
+            break;
+        case RESEND:
+            parse_resend_hdr_mtp(homa_common_h, data_end, ev);
+            break;
+        default:
+            return -1;
+    }
+
+    return ev->type;
 }
