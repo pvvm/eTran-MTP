@@ -755,7 +755,6 @@ int RpcSocket::message_tx_segmentation(InternalReqMeta *req_meta, unsigned int s
         struct data_header *d = reinterpret_cast<struct data_header *>(pkt + sizeof(struct ethhdr) + sizeof(struct iphdr));
         d->unused1 = slot_idx;
 
-        printf("%lu, %lu, %u\n", HOMA_PAYLOAD_OFFSET + plen, HOMA_PAYLOAD_OFFSET, plen);
         struct app_event *ev = reinterpret_cast<struct app_event *>(pkt + HOMA_PAYLOAD_OFFSET + plen);
         struct HOMABP *bp = reinterpret_cast<struct HOMABP *>(pkt + HOMA_PAYLOAD_OFFSET + plen + sizeof(struct app_event));
 
@@ -764,10 +763,6 @@ int RpcSocket::message_tx_segmentation(InternalReqMeta *req_meta, unsigned int s
             req_meta->rpcid);
 
         send_req_ep_user(bp, ev, req_meta);
-        printf("%u\n", __cpu_to_be16(_local_port));
-        printf("%u\n", _local_port);
-        printf("%u\n", message_length);
-        printf("%u\n", __cpu_to_be32(message_length));
         #else
         /* fill IP header */
         struct iphdr *iph = reinterpret_cast<struct iphdr *>(pkt + sizeof(struct ethhdr));

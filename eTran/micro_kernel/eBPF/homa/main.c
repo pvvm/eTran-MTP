@@ -351,8 +351,10 @@ int xdp_egress_prog(struct xdp_md *ctx)
     CHECK_AND_DROP_LOG(d + 1 > data_end, "d + 1 > data_end");
     #endif
 
-    if (action == XDP_TX)
+    if (action == XDP_TX) {
+        bpf_printk("YAY");
         return xmit_packet(ctx, eth, iph);
+    }
     
     ret = enqueue_pkt_to_rl(ctx, rpc_qid, eth, iph);
     

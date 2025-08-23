@@ -45,6 +45,45 @@ struct HOMABP {
 };
 
 static __always_inline
+void new_ctx_instr_wrapper(struct rpc_state *ctx, struct app_event *ev, struct HOMABP *bp, bool first_packet) {
+    if (first_packet) {
+        /* create a new RPC state */
+        ctx->state = BPF_RPC_OUTGOING;
+        ctx->message_length = bpf_ntohl(bp->data.message_length);
+        ctx->next_xmit_offset = bpf_ntohl(bp->data.seg.segment_length);
+        ctx->buffer_head = ev->addr;
+        ctx->remote_port = bpf_ntohs(bp->common.dest_port);
+        ctx->local_port = bpf_ntohs(bp->common.src_port);
+        ctx->remote_ip = bpf_ntohl(ev->remote_ip);
+        ctx->id = bpf_be64_to_cpu(bp->common.sender_id);
+        ctx->cc.granted = min(bpf_ntohl(bp->data.message_length), Homa_unsched_bytes);
+        ctx->qid = MAX_BUCKET_SIZE;
+    }
+}
+
+static __always_inline
+void pkt_gen_instr_wrapper(struct data_header *d, struct HOMABP *bp) {
+    d->common.sport = bp->common.src_port;
+    d->common.dport = bp->common.dest_port;
+    d->common.doff = bp->common.doff;
+    d->common.type = bp->common.type;
+    d->common.seq = bp->common.seq;
+    d->common.sender_id = bp->common.sender_id;
+
+    d->message_length = bp->data.message_length;
+    d->retransmit = bp->data.retransmit;
+    d->incoming = bp->data.incoming;
+    d->cutoff_version = bp->data.cutoff_version;
+
+    d->seg.offset = bp->data.seg.offset;
+    d->seg.segment_length = bp->data.seg.segment_length;
+
+    d->seg.ack.rpcid = bp->data.seg.ack.rpcid;
+    d->seg.ack.sport = bp->data.seg.ack.sport;
+    d->seg.ack.dport = bp->data.seg.ack.dport;
+}
+
+static __always_inline
 int send_req_ep_cient(struct data_header *d, struct iphdr *iph, struct app_event *ev, 
     struct HOMABP *bp, struct rpc_state *ctx,
     __u64 *rpc_qid, bool *trigger)
@@ -58,25 +97,15 @@ int send_req_ep_cient(struct data_header *d, struct iphdr *iph, struct app_event
     __u32 packet_bytes = bpf_ntohl(bp->data.seg.segment_length);
     bool single_packet = message_length <= HOMA_MSS;
     
-    if (first_packet) {
-        /* create a new RPC state */
-        ctx->state = BPF_RPC_OUTGOING;
-        ctx->message_length = message_length;
-        ctx->next_xmit_offset = packet_bytes;
-        ctx->buffer_head = ev->addr;
-        ctx->remote_port = bpf_ntohs(bp->common.dest_port);
-        ctx->local_port = bpf_ntohs(bp->common.src_port);
-        ctx->remote_ip = bpf_ntohl(iph->daddr);
-        ctx->id = bpf_be64_to_cpu(bp->common.sender_id);
-        ctx->cc.granted = min(message_length, Homa_unsched_bytes);
-        ctx->qid = MAX_BUCKET_SIZE;
+    new_ctx_instr_wrapper(ctx, ev, bp, first_packet);
 
-        /* optimization for single-packet case */
-        if (likely(single_packet)) {
-            set_prio(iph, HOMA_MAX_PRIORITY - 1);
-            bp->data.incoming = bpf_htonl(message_length);
-            return XDP_TX;
-        }
+    /* optimization for single-packet case */
+    if (likely(single_packet)) {
+        bpf_printk("OLA");
+        set_prio(iph, HOMA_MAX_PRIORITY - 1);
+        bp->data.incoming = bpf_htonl(message_length);
+        pkt_gen_instr_wrapper(d, bp);
+        return XDP_TX;
     }
 
     if (offset + packet_bytes < Homa_unsched_bytes)
@@ -98,9 +127,12 @@ int send_req_ep_cient(struct data_header *d, struct iphdr *iph, struct app_event
         {
             /* this update is safe for no packets in rate limiter */
             ctx->next_xmit_offset = offset + packet_bytes;
+            pkt_gen_instr_wrapper(d, bp);
             return XDP_TX;
         }
     }
+
+    pkt_gen_instr_wrapper(d, bp);
 
     /* Unfortunately, we should enqueue this packet to rate limiter */
     atomic_inc(&ctx->nr_pkts_in_rl);
