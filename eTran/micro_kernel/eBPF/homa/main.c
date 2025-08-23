@@ -297,10 +297,8 @@ int xdp_egress_prog(struct xdp_md *ctx)
     }
     if (rpc_is_client(bpf_be64_to_cpu(bp->common.sender_id)))
         action = send_req_ep_cient(d, iph, ev, bp, state, &rpc_qid, &trigger);
-    //else
-    //    action = send_resp_ep_server(d, iph, ev, bp, state, &rpc_qid, &trigger);
     else
-        action = XDP_TX;
+        action = send_resp_ep_server(d, iph, ev, bp, state, &rpc_qid, &trigger);
     #endif
     
     #ifndef MTP_ON
@@ -352,7 +350,6 @@ int xdp_egress_prog(struct xdp_md *ctx)
     #endif
 
     if (action == XDP_TX) {
-        bpf_printk("YAY");
         return xmit_packet(ctx, eth, iph);
     }
     
