@@ -428,7 +428,8 @@ int xdp_sock_prog(struct xdp_md *ctx)
 
 
     struct rpc_state *state = NULL;
-    if(!get_context_mtp(&ev, state) || !state)
+    bool first_req = false;
+    if(!get_context_mtp(&ev, state, &first_req) || !state)
         return XDP_DROP;
 
     /*if(proto_type == DATA) {
@@ -522,12 +523,12 @@ bypass_lb:
         ret = client_response(homa_data_hdr, remote_ip, data_meta, single_packet);
     else {
         ret = server_request(homa_data_hdr, remote_ip, single_packet);
-        /*struct interm_out int_out = {0};
+        struct interm_out int_out = {0};
         if(first_req) {
             first_req_pkt_ep(&ev, state, data_meta, &int_out);
         } else {
             next_req_pkt_ep(&ev, state, data_meta, &int_out);
-        }*/
+        }
     }
 
     CHECK_AND_DROP_LOG(ret == XDP_DROP, "XDP_DROP for error rpc state");

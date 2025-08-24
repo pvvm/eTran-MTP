@@ -425,7 +425,7 @@ int parse_ack_info(struct hdr_cursor *nh, void *data_end,
 }
 
 static __always_inline
-int get_context_mtp(struct net_event *ev, struct rpc_state *state) {
+int get_context_mtp(struct net_event *ev, struct rpc_state *state, bool *first_req) {
     struct rpc_key_t hkey = {0};
     hkey.rpcid = local_id(ev->sender_id);
     hkey.local_port = ev->local_port;
@@ -433,9 +433,9 @@ int get_context_mtp(struct net_event *ev, struct rpc_state *state) {
     hkey.remote_ip = ev->remote_ip;
 
     state = bpf_map_lookup_elem(&rpc_tbl, &hkey);
-    bool first_req = false;
+    *first_req = false;
     if(!state) {
-        first_req = true;
+        *first_req = true;
         struct rpc_state new_state = {0};
         bpf_map_update_elem(&rpc_tbl, &hkey, &new_state, BPF_NOEXIST);
         state = bpf_map_lookup_elem(&rpc_tbl, &hkey);
