@@ -296,7 +296,7 @@ int xdp_egress_prog(struct xdp_md *ctx)
         CHECK_AND_DROP_LOG(!state, "client_request, bpf_map_lookup_elem failed.");
     }
     if (rpc_is_client(bpf_be64_to_cpu(bp->common.sender_id)))
-        action = send_req_ep_cient(d, iph, ev, bp, state, &rpc_qid, &trigger);
+        action = send_req_ep_client(d, iph, ev, bp, state, &rpc_qid, &trigger);
     else
         action = send_resp_ep_server(d, iph, ev, bp, state, &rpc_qid, &trigger);
     #endif
@@ -416,9 +416,49 @@ int xdp_sock_prog(struct xdp_md *ctx)
     nh.pos = data + sizeof(struct ethhdr) + sizeof(struct iphdr);
     iph = (struct iphdr *)(data + sizeof(struct ethhdr));
 
+
+
+
+
+    /*************** MTP START ****************/
+
     struct net_event ev;
     proto_type = parse_packet_mtp(&nh, iph, data_end, &ev);
-    CHECK_AND_DROP_LOG(proto_type < 0, "homa_parse_common_hdr failed");
+    CHECK_AND_DROP_LOG(proto_type < 0, "parse_packet_mtp failed");
+
+
+    struct rpc_state *state = NULL;
+    if(!get_context_mtp(&ev, state) || !state)
+        return XDP_DROP;
+
+    /*if(proto_type == DATA) {
+        // Question: should we have an EP for this? Or how can we abstract it?
+        struct ack_net_info ack_info = {0};
+        if(!parse_ack_info(&nh, data_end, &ack_info, ev.remote_ip))
+            return XDP_DROP;
+        reclaim_rpc_mtp(ack_info, data_meta);
+
+        if (rpc_is_client(local_id(bpf_be64_to_cpu(ev.sender_id)))) {
+            //ret = client_response(homa_data_hdr, remote_ip, data_meta, single_packet);
+            ret = recv_resp_ep_client(&ev, state, data_meta);
+        } else {
+            ret = recv_req_ep_server(&ev, state, data_meta);
+            //ret = server_request(homa_data_hdr, remote_ip, single_packet);
+        }
+    }
+
+    CHECK_AND_DROP_LOG(ret == XDP_DROP, "XDP_DROP for error rpc state");
+
+    target_xsk = bpf_map_lookup_elem(&port_tbl, &local_port);
+    CHECK_AND_DROP_LOG(!target_xsk, "Can't find corresponding XSK fd for this packet");
+    
+    socket_id = target_xsk->xsk_map_idx[current_cpu];
+    CHECK_AND_DROP_LOG(socket_id < 0, "socket_id < 0");
+    
+    return bpf_redirect_map(&xsks_map, socket_id, XDP_DROP);*/
+
+    /*************** MTP END ****************/
+
 
     //#ifndef MTP_ON
     proto_type = homa_parse_common_hdr(&nh, data_end, &homa_common_hdr);
@@ -480,8 +520,15 @@ bypass_lb:
     
     if (rpc_is_client(local_id(bpf_be64_to_cpu(homa_data_hdr->common.sender_id))))
         ret = client_response(homa_data_hdr, remote_ip, data_meta, single_packet);
-    else
+    else {
         ret = server_request(homa_data_hdr, remote_ip, single_packet);
+        /*struct interm_out int_out = {0};
+        if(first_req) {
+            first_req_pkt_ep(&ev, state, data_meta, &int_out);
+        } else {
+            next_req_pkt_ep(&ev, state, data_meta, &int_out);
+        }*/
+    }
 
     CHECK_AND_DROP_LOG(ret == XDP_DROP, "XDP_DROP for error rpc state");
 

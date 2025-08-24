@@ -1,5 +1,14 @@
 #define MTP_ON 1
 
+#define ceil DIV_ROUND_UP
+
+struct ack_net_info {
+    __u64 rpcid;
+    __u16 sport;
+    __u16 dport;
+    __u32 remote_ip;
+};
+
 struct net_event {
     // IP addrs
     __u32 remote_ip;
@@ -15,6 +24,7 @@ struct net_event {
     __u32 message_length;
     __u32 incoming;
     __u8 retransmit;
+    __u32 segment_length;
 
     // Grant/Resend header
     __u32 offset;
@@ -71,6 +81,18 @@ struct HOMABP {
     struct DATA_HDR data;
 };
 
+
+struct interm_out {
+    __u8 type_pkt;
+    bool complete;
+    bool new_state;
+    bool need_schedule;
+    bool dup_data_pkt;
+    __u32 last_bytes_remaining;
+    bool last_grant;
+    bool send_fifo_rpc;
+};
+
 // Question: if we don't use BP to fill the initial context
 // values, what should we use?
 static __always_inline
@@ -125,7 +147,7 @@ void pkt_gen_instr_wrapper(struct data_header *d, struct HOMABP *bp) {
 }
 
 static __always_inline
-int send_req_ep_cient(struct data_header *d, struct iphdr *iph, struct app_event *ev, 
+int send_req_ep_client(struct data_header *d, struct iphdr *iph, struct app_event *ev, 
     struct HOMABP *bp, struct rpc_state *ctx,
     __u64 *rpc_qid, bool *trigger)
 {
@@ -178,6 +200,8 @@ int send_req_ep_cient(struct data_header *d, struct iphdr *iph, struct app_event
     // and delay thing.
     // But here the decision on whether the packet should be sent or not
     // (XDP_TX or XDP_REDIRECT) is a part of the EP.
+
+    // TODO: this part underneath should be abstracted
 
     struct rpc_state_cc *cc_node = NULL;
     struct rpc_state_cc *ref_cc_node = NULL;
@@ -325,6 +349,7 @@ static __always_inline void parse_data_hdr_mtp(struct common_header *c,
     ev->message_length = bpf_ntohl(d->message_length);
     ev->incoming = bpf_ntohl(d->incoming);
     ev->retransmit = d->retransmit;
+    ev->segment_length = bpf_ntohl(d->seg.segment_length);
 }
 
 static __always_inline void parse_grant_hdr_mtp(struct common_header *c,
@@ -382,4 +407,345 @@ static __always_inline int parse_packet_mtp(struct hdr_cursor *nh, struct iphdr 
     }
 
     return ev->type;
+}
+
+static __always_inline
+int parse_ack_info(struct hdr_cursor *nh, void *data_end,
+    struct ack_net_info *ack_info, __u32 remote_ip) {
+
+    struct data_header *d = (struct data_header *)nh->pos;
+    if(d + 1 > data_end)
+        return 0;
+
+    ack_info->rpcid = bpf_be64_to_cpu(d->seg.ack.rpcid);
+    ack_info->dport = bpf_ntohs(d->seg.ack.dport);
+    ack_info->sport = bpf_ntohs(d->seg.ack.sport);
+    ack_info->remote_ip = remote_ip;
+    return 1;
+}
+
+static __always_inline
+int get_context_mtp(struct net_event *ev, struct rpc_state *state) {
+    struct rpc_key_t hkey = {0};
+    hkey.rpcid = local_id(ev->sender_id);
+    hkey.local_port = ev->local_port;
+    hkey.remote_port = ev->remote_port;
+    hkey.remote_ip = ev->remote_ip;
+
+    state = bpf_map_lookup_elem(&rpc_tbl, &hkey);
+    bool first_req = false;
+    if(!state) {
+        first_req = true;
+        struct rpc_state new_state = {0};
+        bpf_map_update_elem(&rpc_tbl, &hkey, &new_state, BPF_NOEXIST);
+        state = bpf_map_lookup_elem(&rpc_tbl, &hkey);
+        if(!state) {
+            bpf_printk("Error get_context_mtp");
+            return 0;
+        }
+    }
+    return 1;
+}
+
+
+static __always_inline
+void reclaim_rpc_mtp(struct ack_net_info ack_info, struct homa_meta_info *data_meta)
+{
+    struct rpc_state *delete_rpc_slot = NULL;
+    __u64 del_rpcid = ack_info.rpcid;
+    __u16 del_local_port = ack_info.dport;
+    __u16 del_remote_port = ack_info.sport;
+    
+    if (del_rpcid == 0 && del_local_port == 0 && del_remote_port == 0)
+        return;
+
+    del_rpcid = local_id(del_rpcid);
+
+    struct rpc_key_t delete_hkey = {0};
+    delete_hkey.rpcid = del_rpcid;
+    delete_hkey.local_port = del_local_port;
+    delete_hkey.remote_port = del_remote_port;
+    delete_hkey.remote_ip = ack_info.remote_ip;
+
+    delete_rpc_slot = bpf_map_lookup_elem(&rpc_tbl, &delete_hkey);
+    if (!delete_rpc_slot)
+        return;
+
+    RPC_LOCK(delete_rpc_slot);
+    if (delete_rpc_slot->state == BPF_RPC_DEAD)
+    {
+        RPC_UNLOCK(delete_rpc_slot);
+        return;
+    }
+    /* ensure that only we can delete it */
+    delete_rpc_slot->state = BPF_RPC_DEAD;
+    RPC_UNLOCK(delete_rpc_slot);
+    
+    data_meta->rx.reap_server_buffer_addr = delete_rpc_slot->buffer_head;
+    
+    if (delete_rpc_slot->qid != MAX_BUCKET_SIZE)
+        free_qid(delete_rpc_slot->qid);
+
+    /* free rpc_state_cc object if it exists */
+    struct rpc_state_cc *cc_node = NULL;
+    GET_POINTER(cc_node, delete_rpc_slot);
+    if (cc_node)
+        bpf_obj_drop(cc_node);
+
+    bpf_map_delete_elem(&rpc_tbl, &delete_hkey);
+}
+
+#if 0
+static __always_inline
+int recv_resp_ep_client(struct net_event *ev, struct rpc_state *ctx,
+    struct homa_meta_info *data_meta) {
+        
+    bool new_state = false;
+    int complete = 0;
+
+    __u16 seq = ev->seq;
+    __u32 message_length = ev->message_length;
+    __u32 incoming = ev->incoming;
+    __u64 seg_length = ev->segment_length;
+    
+    RPC_LOCK(ctx);
+
+    if (unlikely(ctx->state == BPF_RPC_DEAD)) {
+        RPC_UNLOCK(ctx);
+        return XDP_DROP;
+    }
+
+    new_state = ctx->state == BPF_RPC_OUTGOING;
+    
+    if (new_state) { /* first response packet */
+        if (likely(single_packet)) 
+        {
+            /* ensure that only we can delete it */
+            ctx->state = BPF_RPC_DEAD;
+            RPC_UNLOCK(ctx);
+            
+            /* userspace will use this metadata to free buffers */
+            data_meta->rx.reap_client_buffer_addr = ctx->buffer_head;
+
+            /* if we allocate qid for this rpc, we need to free it */
+            if (ctx->qid != MAX_BUCKET_SIZE)
+                free_qid(ctx->qid);
+
+            bpf_map_delete_elem(&rpc_tbl, &hkey);
+            
+            enqueue_dead_crpc(hkey.remote_ip, hkey.remote_port, hkey.local_port, hkey.rpcid);
+
+            return XDP_REDIRECT;
+        }
+        
+        ctx->state = BPF_RPC_INCOMING;
+        ctx->bit_width = DIV_ROUND_UP(message_length, HOMA_MSS);
+        
+        clear_all_bitmaps(ctx);
+
+        set_bitmap(ctx, seq);
+
+        ctx->message_length = message_length;
+        ctx->cc.incoming = incoming;
+        
+        ctx->cc.bytes_remaining = message_length - seg_length;
+
+        RPC_UNLOCK(ctx);
+
+        __sync_fetch_and_add(&total_incoming, (__u64)(incoming - seg_length));
+
+        /* free rpc_state_cc object if it exists (used for pacing before) */
+        struct rpc_state_cc *cc_node = NULL;
+        GET_POINTER(cc_node, ctx);
+        if (cc_node)
+            bpf_obj_drop(cc_node);
+    }
+    else {   /* not the first response packet */
+
+        complete = set_bitmap(ctx, seq);
+        if (complete == -1)
+        {
+            RPC_UNLOCK(ctx);
+            bpf_printk("set_bitmap failed, rpcid = %llu, seq = %u", hkey.rpcid, seq);
+            return XDP_DROP;
+        }
+        if (incoming > ctx->cc.incoming)
+            ctx->cc.incoming = incoming;
+        ctx->cc.bytes_remaining -= seg_length;
+
+        if (complete == 1)
+        {   /* all response packets have been received */
+            ctx->state = BPF_RPC_DEAD;
+            RPC_UNLOCK(ctx);
+            /* userspace will use this metadata to free buffers */
+            data_meta->rx.reap_client_buffer_addr = ctx->buffer_head;
+
+            /* if we allocate qid for this rpc, we need to free it */
+            if (ctx->qid != MAX_BUCKET_SIZE)
+                free_qid(ctx->qid);
+
+            enqueue_dead_crpc(hkey.remote_ip, hkey.remote_port, hkey.local_port, hkey.rpcid);
+
+            /* note: after we delete the rpc state, our CC object may still be in the grant_list, 
+                * but it would be finally removed, don't worry about it 
+                */
+            bpf_map_delete_elem(&rpc_tbl, &hkey);
+
+            return XDP_REDIRECT;
+        }
+        
+        RPC_UNLOCK(ctx);
+        
+        __sync_fetch_and_sub(&total_incoming, (__u64)seg_length);
+    }
+
+    bool need_schedule = message_length > ctx->cc.incoming;
+
+    if (need_schedule)
+        cache_this_rpc(hkey);
+    
+    if (!new_state || !need_schedule)
+        return XDP_REDIRECT;
+
+    return insert_grant_list(ctx, &hkey, message_length);
+}
+#endif
+
+/* In MTP program:
+first_req_pkt_ep -> everything in recv_req_ep_server() except the else case.
+    Also, the conditions in the end are transformed into int_out.
+
+next_req_pkt_ep -> is everything in recv_req_ep_server() except the if case.
+    Also, the conditions in the end are transformed into int_out.
+
+sched_ep -> it seems to be insert_grant_list()
+
+choose_grants -> the first XDP_GEN tail call function
+
+update_prios -> the other 8 tail call functions in XDP_GEN
+
+gen_grants -> the main XDP_GEN function (after the tail call happens)
+*/
+
+// Question: how can the compiler know that choose_grants, update_prios, etc
+// would go to XDP_GEN?
+
+static __always_inline
+int first_req_pkt_ep(struct net_event *ev, struct rpc_state *ctx,
+    struct homa_meta_info *data_meta, struct interm_out *int_out) {
+
+    __u16 seq = ev->seq;
+    __u32 message_length = ev->message_length;
+    __u32 incoming = ev->incoming;
+    __u64 seg_length = ev->segment_length;
+    bool single_packet = ev->message_length <= HOMA_MSS;
+
+
+    CHECK_AND_DROP_LOG(ev->retransmit, "server_request: retransmitted packet tries to create state.");
+    
+    ctx->remote_ip = ev->remote_ip;
+    ctx->remote_port = ev->remote_port;
+    ctx->local_port = ev->local_port;
+    ctx->id = ev->sender_id;
+    ctx->state = BPF_RPC_INCOMING;
+    if(single_packet)
+        ctx->state = BPF_RPC_IN_SERVICE;
+
+    // TODO: wrap sliding window into bitmap
+    ctx->bit_width = ceil(message_length, HOMA_MSS);
+    clear_all_bitmaps(ctx);
+    set_bitmap(ctx, seq);
+
+    ctx->message_length = message_length;
+    ctx->cc.incoming = incoming;
+    ctx->cc.bytes_remaining = message_length - seg_length;
+
+    int_out->complete = single_packet;
+    int_out->new_state = true;
+    int_out->need_schedule = message_length > ctx->cc.incoming;
+    /* we create the ctx successfully */
+
+    // Question: I think that this might be missing in MTP's first_req_pkt_ep and
+    // next_req_pkt_ep, no?
+    __sync_fetch_and_add(&total_incoming, (__u64)(incoming - seg_length));
+
+    if (int_out->complete)
+        return XDP_REDIRECT;
+
+    // Question: so no caching for now?
+    //if (need_schedule)
+    //    cache_this_rpc(hkey);
+
+    if (!int_out->new_state || !int_out->need_schedule)
+        return XDP_REDIRECT;
+
+
+    struct rpc_key_t hkey = {0};
+    hkey.rpcid = local_id(ev->sender_id);
+    hkey.local_port = ev->local_port;
+    hkey.remote_port = ev->remote_port;
+    hkey.remote_ip = ev->remote_ip;
+    return insert_grant_list(ctx, &hkey, message_length);
+}
+
+static __always_inline
+int next_req_pkt_ep(struct net_event *ev, struct rpc_state *ctx,
+    struct homa_meta_info *data_meta, struct interm_out *int_out) {
+
+    __u16 seq = ev->seq;
+    __u32 message_length = ev->message_length;
+    __u32 incoming = ev->incoming;
+    __u64 seg_length = ev->segment_length;
+
+    RPC_LOCK(ctx);
+    
+    if (unlikely(ctx->state == BPF_RPC_DEAD))
+    {
+        RPC_UNLOCK(ctx);
+        return XDP_DROP;
+    }
+
+    // Question: see how we can wrap sliding window to bitmap
+    int complete = set_bitmap(ctx, seq);
+    if (complete == 1) {
+        ctx->state = BPF_RPC_IN_SERVICE;
+    }
+    else if (complete == -1)
+    {
+        RPC_UNLOCK(ctx);
+        bpf_printk("set_bitmap failed, rpcid = %llu, seq = %u", ev->sender_id, seq);
+        return XDP_DROP;
+    }
+    
+    if (incoming > ctx->cc.incoming)
+        ctx->cc.incoming = incoming;
+
+    int_out->complete = complete;
+    
+    int_out->last_bytes_remaining = ctx->cc.bytes_remaining;
+    ctx->cc.bytes_remaining -= seg_length;
+    
+    int_out->need_schedule = message_length > ctx->cc.incoming;
+    
+    RPC_UNLOCK(ctx);
+    
+    __sync_fetch_and_sub(&total_incoming, (__u64)seg_length);
+
+    if (int_out->complete)
+        return XDP_REDIRECT;
+
+    // Question: so no caching for now?
+    //if (need_schedule)
+    //    cache_this_rpc(hkey);
+
+    if (!int_out->new_state || !int_out->need_schedule)
+        return XDP_REDIRECT;
+
+
+    struct rpc_key_t hkey = {0};
+    hkey.rpcid = local_id(ev->sender_id);
+    hkey.local_port = ev->local_port;
+    hkey.remote_port = ev->remote_port;
+    hkey.remote_ip = ev->remote_ip;
+    return insert_grant_list(ctx, &hkey, message_length);
 }
